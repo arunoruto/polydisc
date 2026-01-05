@@ -1,7 +1,51 @@
 import numpy as np
 import pytest
 
-from src.poisson_disc import poisson_disc_samples
+from pysson_disc.poisson_disc import poisson_disc_samples
+
+
+def test_cli_generate_config_from_stdin_toml() -> None:
+    from click.testing import CliRunner
+
+    from pysson_disc.cli import cli
+
+    runner = CliRunner()
+
+    config_toml = """\
+dims = 2
+bounds = [50.0, 50.0]
+radii = [5.0, 10.0]
+repetitions = 5
+seed = 0
+"""
+
+    result = runner.invoke(
+        cli,
+        ["generate", "--config", "-", "--out", "-"],
+        input=config_toml,
+    )
+    assert result.exit_code == 0, result.output
+
+    # CSV data output (not config)
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    assert lines[0].strip() == "x,y,r"
+    assert len(lines) >= 2
+
+
+def test_parse_gaussian_string() -> None:
+    from pysson_disc.cli import _parse_gaussian
+
+    mean, sigma = _parse_gaussian("10,2", option_name="--gaussian")
+    assert mean == 10.0
+    assert sigma == 2.0
+
+
+def test_parse_gaussian_object() -> None:
+    from pysson_disc.cli import _parse_gaussian
+
+    mean, sigma = _parse_gaussian({"mean": 10, "sigma": 2}, option_name="--gaussian")
+    assert mean == 10.0
+    assert sigma == 2.0
 
 
 def _assert_in_bounds(

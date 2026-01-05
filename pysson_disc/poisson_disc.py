@@ -1,6 +1,29 @@
 import numpy as np
-
 from numba import njit
+
+
+def _prepare_radii_cdf(
+    allowed_radii: np.ndarray, weights: np.ndarray | None
+) -> np.ndarray:
+    allowed_radii_arr = np.asarray(allowed_radii, dtype=np.float64)
+
+    if weights is None:
+        w = np.full(allowed_radii_arr.shape[0], 1.0, dtype=np.float64)
+    else:
+        w = np.asarray(weights, dtype=np.float64)
+        if w.shape != allowed_radii_arr.shape:
+            raise ValueError("weights must have same shape as allowed_radii")
+        if np.any(w < 0):
+            raise ValueError("weights must be non-negative")
+
+    total = float(np.sum(w))
+    if total <= 0:
+        raise ValueError("weights must sum to > 0")
+
+    w = w / total
+    cdf = np.cumsum(w)
+    cdf[-1] = 1.0
+    return cdf
 
 
 @njit(cache=True)
@@ -14,9 +37,26 @@ def _random_unit_vector(dimensions: int) -> np.ndarray:
 
 
 @njit(cache=True)
+def _sample_from_cdf(values: np.ndarray, cdf: np.ndarray) -> float:
+    u = np.random.random()
+
+    lo = 0
+    hi = cdf.shape[0] - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if u <= cdf[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+
+    return float(values[lo])
+
+
+@njit(cache=True)
 def _poisson_disc_samples_2d_numba(
     bounds: np.ndarray,
     allowed_radii: np.ndarray,
+    radii_cdf: np.ndarray,
     repetitions: int,
     rmin: float,
     rmax: float,
@@ -34,7 +74,8 @@ def _poisson_disc_samples_2d_numba(
     background_grid[:] = np.nan
 
     # Step 1: initial sample
-    radius = allowed_radii[np.random.randint(allowed_radii.shape[0])]
+    radius = _sample_from_cdf(allowed_radii, radii_cdf)
+
     position = np.random.random(dimensions) * (bounds - 2.0 * radius) + radius
 
     position_index = np.floor(position / cell_size).astype(np.int64)
@@ -56,14 +97,16 @@ def _poisson_disc_samples_2d_numba(
 
         found = False
         for _ in range(repetitions):
-            test_radius = allowed_radii[np.random.randint(allowed_radii.shape[0])]
+            test_radius = _sample_from_cdf(allowed_radii, radii_cdf)
 
             offset = _random_unit_vector(dimensions)
-            offset *= (
-                test_radius
-                + active_radius
-                + min(test_radius, active_radius) * np.random.random()
-            )
+
+            # Bridson-style candidate generation in an annulus.
+            # Here we approximate a variable-radius analogue by using
+            # r_sum = (active_radius + test_radius) and sampling uniformly from
+            # [r_sum, 2*r_sum].
+            r_sum = active_radius + test_radius
+            offset *= r_sum * (1.0 + np.random.random())
             test_position = active_position + offset
 
             # bounds check
@@ -147,6 +190,7 @@ def _poisson_disc_samples_2d_numba(
 def _poisson_disc_samples_3d_numba(
     bounds: np.ndarray,
     allowed_radii: np.ndarray,
+    radii_cdf: np.ndarray,
     repetitions: int,
     rmin: float,
     rmax: float,
@@ -165,7 +209,7 @@ def _poisson_disc_samples_3d_numba(
     background_grid[:] = np.nan
 
     # Step 1: initial sample
-    radius = allowed_radii[np.random.randint(allowed_radii.shape[0])]
+    radius = _sample_from_cdf(allowed_radii, radii_cdf)
     position = np.random.random(dimensions) * (bounds - 2.0 * radius) + radius
 
     position_index = np.floor(position / cell_size).astype(np.int64)
@@ -176,12 +220,9 @@ def _poisson_disc_samples_3d_numba(
         position_index[0], position_index[1], position_index[2], dimensions
     ] = radius
 
-    active_points = np.empty(
-        (cell_bounds[0] * cell_bounds[1] * cell_bounds[2], dimensions), dtype=np.float64
-    )
-    active_radii = np.empty(
-        cell_bounds[0] * cell_bounds[1] * cell_bounds[2], dtype=np.float64
-    )
+    total_cells = cell_bounds[0] * cell_bounds[1] * cell_bounds[2]
+    active_points = np.empty((total_cells, dimensions), dtype=np.float64)
+    active_radii = np.empty(total_cells, dtype=np.float64)
     active_count = 1
     active_points[0] = position
     active_radii[0] = radius
@@ -193,14 +234,11 @@ def _poisson_disc_samples_3d_numba(
 
         found = False
         for _ in range(repetitions):
-            test_radius = allowed_radii[np.random.randint(allowed_radii.shape[0])]
-
+            test_radius = _sample_from_cdf(allowed_radii, radii_cdf)
             offset = _random_unit_vector(dimensions)
-            offset *= (
-                test_radius
-                + active_radius
-                + min(test_radius, active_radius) * np.random.random()
-            )
+
+            r_sum = active_radius + test_radius
+            offset *= r_sum * (1.0 + np.random.random())
             test_position = active_position + offset
 
             # bounds check
@@ -272,7 +310,6 @@ def _poisson_disc_samples_3d_numba(
             active_count -= 1
 
     # Extract samples from the grid
-    total_cells = cell_bounds[0] * cell_bounds[1] * cell_bounds[2]
     tmp_points = np.empty((total_cells, dimensions), dtype=np.float64)
     tmp_radii = np.empty(total_cells, dtype=np.float64)
     out_count = 0
@@ -290,7 +327,9 @@ def _poisson_disc_samples_3d_numba(
     return tmp_points[:out_count], tmp_radii[:out_count]
 
 
-def poisson_disc_samples(bounds, radii, repetitions=30, *, rmin_rmax=None):
+def poisson_disc_samples(
+    bounds, radii, repetitions=30, *, rmin_rmax=None, weights=None
+):
     """Generate Poisson-disc samples in an N-D axis-aligned box.
 
     This is a variable-radius variant of Bridson's algorithm (algorithm 4.3).
@@ -326,12 +365,14 @@ def poisson_disc_samples(bounds, radii, repetitions=30, *, rmin_rmax=None):
 
         dimensions = bounds_arr.shape[0]
         if dimensions == 2:
+            radii_cdf = _prepare_radii_cdf(allowed_radii, weights)
             return _poisson_disc_samples_2d_numba(
-                bounds_arr, allowed_radii, int(repetitions), rmin, rmax
+                bounds_arr, allowed_radii, radii_cdf, int(repetitions), rmin, rmax
             )
         if dimensions == 3:
+            radii_cdf = _prepare_radii_cdf(allowed_radii, weights)
             return _poisson_disc_samples_3d_numba(
-                bounds_arr, allowed_radii, int(repetitions), rmin, rmax
+                bounds_arr, allowed_radii, radii_cdf, int(repetitions), rmin, rmax
             )
 
         raise ValueError(

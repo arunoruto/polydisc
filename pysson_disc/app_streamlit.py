@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import io
+
+import matplotlib.pyplot as plt
 import numpy as np
-import plotly.graph_objects as go
+import pyvista as pv
 import streamlit as st
-from poisson_disc import poisson_disc_samples
+from matplotlib.patches import Circle
+from stpyvista import stpyvista
+
+from pysson_disc.poisson_disc import poisson_disc_samples
 
 
 def _find_violations(points: np.ndarray, radii: np.ndarray) -> tuple[int, float]:
@@ -42,6 +48,13 @@ def _sphere_points(
 def main() -> None:
     st.set_page_config(page_title="Poisson-disc inspector", layout="wide")
 
+    # Helps VTK/PyVista render inside Streamlit on headless systems.
+    # On desktop setups this is typically a no-op.
+    try:
+        pv.start_xvfb()
+    except Exception:
+        pass
+
     st.title("Poisson-disc sampling inspector")
     st.caption("Interactive view for 2D/3D box sampling (Numba accelerated).")
 
@@ -75,13 +88,11 @@ def main() -> None:
         show_discs = st.checkbox("show discs/spheres", value=True)
 
         marker_size = st.slider(
-            "marker size", min_value=1, max_value=12, value=4 if dims == 2 else 3
-        )
-        scale_marker_by_radius = st.checkbox(
-            "scale marker size by radius", value=(dims == 3)
-        )
-        max_spheres = st.slider(
-            "max 3D spheres", min_value=0, max_value=300, value=100, step=10
+            "marker size",
+            min_value=1,
+            max_value=12,
+            value=4 if dims == 2 else 3,
+            help=("Point marker size (2D), or 3D point markers when spheres are off."),
         )
         sphere_resolution = st.slider(
             "3D sphere resolution", min_value=8, max_value=30, value=14, step=2
@@ -101,6 +112,41 @@ def main() -> None:
         )
 
     st.success(f"Generated {len(points)} samples")
+
+    if len(points) > 0:
+        col_csv, col_npz = st.columns(2)
+
+        csv_buf = io.StringIO()
+        if dims == 2:
+            csv_buf.write("x,y,r\n")
+        else:
+            csv_buf.write("x,y,z,r\n")
+
+        for p, r in zip(points, pradii):
+            row = ",".join([*(f"{float(v):.10g}" for v in p), f"{float(r):.10g}"])
+            csv_buf.write(row + "\n")
+
+        with col_csv:
+            st.download_button(
+                "Download CSV",
+                data=csv_buf.getvalue(),
+                file_name=f"poisson_disc_{dims}d.csv",
+                mime="text/csv",
+            )
+
+        npz_buf = io.BytesIO()
+        np.savez_compressed(
+            npz_buf, points=points, radii=pradii, bounds=bounds, allowed_radii=radii
+        )
+        npz_buf.seek(0)
+
+        with col_npz:
+            st.download_button(
+                "Download NPZ",
+                data=npz_buf,
+                file_name=f"poisson_disc_{dims}d.npz",
+                mime="application/octet-stream",
+            )
 
     violation_count, worst_overlap = _find_violations(points, pradii)
     if violation_count > 0:
@@ -133,158 +179,154 @@ def main() -> None:
             )
 
     if dims == 2:
-        fig = go.Figure()
+        if len(points) == 0:
+            st.info("No samples to plot.")
+            return
 
-        if show_discs:
-            for p, r in zip(points, pradii):
-                fig.add_shape(
-                    type="circle",
-                    x0=float(p[0] - r),
-                    y0=float(p[1] - r),
-                    x1=float(p[0] + r),
-                    y1=float(p[1] + r),
-                    line=dict(width=1, color="rgba(0,0,0,0.35)"),
-                    fillcolor="rgba(0,140,255,0.15)",
-                )
-
-        marker_sizes = (
-            pradii / float(np.max(pradii)) * (marker_size * 2.5)
-            if (scale_marker_by_radius and len(points) > 0)
-            else np.full(len(points), float(marker_size))
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=points[:, 0],
-                y=points[:, 1],
-                mode="markers",
-                marker=dict(
-                    size=marker_sizes,
-                    color=pradii,
-                    colorscale="Viridis",
-                    showscale=True,
-                    line=dict(width=0),
-                ),
-                name="samples",
-            )
-        )
+        fig, ax = plt.subplots(figsize=(10, 7))
+        ax.set_xlim(0.0, float(bounds[0]))
+        ax.set_ylim(0.0, float(bounds[1]))
+        ax.set_aspect("equal", adjustable="box")
 
         if show_cells:
             cell_size = 2.0 * float(np.min(radii)) / np.sqrt(dims)
-            fig.update_xaxes(dtick=cell_size)
-            fig.update_yaxes(dtick=cell_size)
+            ax.set_xticks(np.arange(0.0, float(bounds[0]) + cell_size, cell_size))
+            ax.set_yticks(np.arange(0.0, float(bounds[1]) + cell_size, cell_size))
+            ax.grid(True, linewidth=0.5, alpha=0.25)
+            ax.tick_params(
+                axis="both", which="both", labelbottom=False, labelleft=False
+            )
         else:
-            # Let Plotly choose sensible ticks
-            fig.update_xaxes(dtick=None)
-            fig.update_yaxes(dtick=None)
-
-        fig.update_yaxes(scaleanchor="x", scaleratio=1)
-        fig.update_layout(
-            height=700,
-            margin=dict(l=20, r=20, t=40, b=20),
-            xaxis=dict(range=[0, float(bounds[0])]),
-            yaxis=dict(range=[0, float(bounds[1])]),
-            showlegend=False,
-        )
-
-        st.plotly_chart(fig, width="stretch")
-
-        if len(points) > 0:
-            hist = go.Figure(
-                data=[
-                    go.Histogram(
-                        x=pradii,
-                        nbinsx=max(1, int(len(np.unique(radii)))),
-                        marker_color="rgba(0,140,255,0.65)",
-                    )
-                ]
+            ax.tick_params(
+                axis="both", which="both", labelbottom=False, labelleft=False
             )
-            hist.update_layout(
-                title="Picked radii distribution",
-                height=250,
-                margin=dict(l=10, r=10, t=40, b=10),
-                xaxis_title="radius",
-                yaxis_title="count",
-            )
-            st.plotly_chart(hist, width="stretch")
 
-    else:
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter3d(
-                x=points[:, 0],
-                y=points[:, 1],
-                z=points[:, 2],
-                mode="markers",
-                marker=dict(
-                    size=(
-                        (pradii / float(np.max(pradii)) * (marker_size * 2.0) + 1.0)
-                        if (scale_marker_by_radius and len(points) > 0)
-                        else float(marker_size)
-                    ),
-                    color=pradii,
-                    colorscale="Viridis",
-                    opacity=0.9,
-                ),
-                name="samples",
-            )
-        )
+        allowed = np.unique(pradii)
+        cmap = plt.get_cmap("viridis", allowed.shape[0])
 
         if show_discs:
-            for p, r in list(zip(points, pradii))[: int(max_spheres)]:
-                xs, ys, zs = _sphere_points(
-                    p, float(r), resolution=int(sphere_resolution)
-                )
-                fig.add_trace(
-                    go.Surface(
-                        x=xs,
-                        y=ys,
-                        z=zs,
-                        opacity=0.15,
-                        showscale=False,
-                        surfacecolor=np.zeros_like(xs),
-                        colorscale=[
-                            [0.0, "rgba(0,140,255,0.15)"],
-                            [1.0, "rgba(0,140,255,0.15)"],
-                        ],
-                        name="sphere",
+            for p, r in zip(points, pradii):
+                idx = int(np.searchsorted(allowed, r))
+                cr, cg, cb, _ = cmap(idx)
+                ax.add_patch(
+                    Circle(
+                        (float(p[0]), float(p[1])),
+                        float(r),
+                        facecolor=(float(cr), float(cg), float(cb), 0.22),
+                        edgecolor="none",
+                        linewidth=0.0,
                     )
                 )
+        else:
+            sc = ax.scatter(
+                points[:, 0],
+                points[:, 1],
+                c=pradii,
+                s=float(marker_size) ** 2 * 8.0,
+                cmap="viridis",
+                linewidths=0.0,
+            )
+            fig.colorbar(sc, ax=ax, label="radius")
 
-        fig.update_layout(
-            height=750,
-            margin=dict(l=20, r=20, t=40, b=20),
-            scene=dict(
-                xaxis=dict(range=[0, float(bounds[0])]),
-                yaxis=dict(range=[0, float(bounds[1])]),
-                zaxis=dict(range=[0, float(bounds[2])]),
-                aspectmode="cube",
-            ),
-            showlegend=False,
+        st.pyplot(fig, use_container_width=True)
+
+        # Histogram (discrete radii friendly)
+        fig_h, ax_h = plt.subplots(figsize=(10, 2.5))
+        unique_r = np.unique(pradii)
+        if unique_r.shape[0] <= 100:
+            # Bin edges halfway between consecutive discrete radii.
+            half_steps = (unique_r[:-1] + unique_r[1:]) * 0.5
+            left = (
+                unique_r[0] - (half_steps[0] - unique_r[0])
+                if unique_r.shape[0] > 1
+                else unique_r[0] - 0.5
+            )
+            right = (
+                unique_r[-1] + (unique_r[-1] - half_steps[-1])
+                if unique_r.shape[0] > 1
+                else unique_r[-1] + 0.5
+            )
+            bins = np.concatenate([[left], half_steps, [right]]).tolist()
+            ax_h.hist(pradii, bins=bins, color="#008cff", alpha=0.7, rwidth=0.9)
+            ax_h.set_xticks(unique_r)
+        else:
+            ax_h.hist(
+                pradii,
+                bins=max(20, int(np.sqrt(len(pradii)))),
+                color="#008cff",
+                alpha=0.7,
+            )
+        ax_h.set_title("Picked radii distribution")
+        ax_h.set_xlabel("radius")
+        ax_h.set_ylabel("count")
+        st.pyplot(fig_h, use_container_width=True)
+
+    else:
+        if len(points) == 0:
+            st.info("No samples to plot.")
+            return
+
+        plotter = pv.Plotter(window_size=[900, 700], off_screen=True)
+
+        # Bounds box
+        cube = pv.Cube(
+            center=(bounds[0] / 2.0, bounds[1] / 2.0, bounds[2] / 2.0),
+            x_length=bounds[0],
+            y_length=bounds[1],
+            z_length=bounds[2],
         )
+        plotter.add_mesh(cube, style="wireframe", color="white", opacity=0.35)
 
-        st.plotly_chart(fig, width="stretch")
+        if show_discs:
+            allowed = np.unique(pradii)
+            cmap = plt.get_cmap("viridis", allowed.shape[0])
 
-        if len(points) > 0:
-            hist = go.Figure(
-                data=[
-                    go.Histogram(
-                        x=pradii,
-                        nbinsx=max(1, int(len(np.unique(radii)))),
-                        marker_color="rgba(0,140,255,0.65)",
-                    )
-                ]
+            for p, r in zip(points, pradii):
+                idx = int(np.searchsorted(allowed, r))
+                cr, cg, cb, _ = cmap(idx)
+
+                sphere = pv.Sphere(
+                    radius=float(r),
+                    center=(float(p[0]), float(p[1]), float(p[2])),
+                    theta_resolution=int(sphere_resolution),
+                    phi_resolution=max(8, int(sphere_resolution // 2)),
+                )
+                plotter.add_mesh(
+                    sphere,
+                    color=(float(cr), float(cg), float(cb)),
+                    opacity=0.15,
+                    style="surface",
+                )
+        else:
+            cloud = pv.PolyData(points)
+            cloud["r"] = pradii
+            plotter.add_mesh(
+                cloud,
+                render_points_as_spheres=True,
+                point_size=float(marker_size) * 2.0,
+                scalars="r",
+                cmap="viridis",
+                opacity=1.0,
             )
-            hist.update_layout(
-                title="Picked radii distribution",
-                height=250,
-                margin=dict(l=10, r=10, t=40, b=10),
-                xaxis_title="radius",
-                yaxis_title="count",
-            )
-            st.plotly_chart(hist, width="stretch")
 
-        st.caption("Note: Rendering spheres is expensive; shows first N from sidebar.")
+        plotter.set_background("#1f2430")
+        plotter.view_isometric()
+
+        stpyvista(plotter, use_container_width=True, key="pyvista_view")
+
+        fig_h, ax_h = plt.subplots(figsize=(10, 2.5))
+        ax_h.hist(
+            pradii,
+            bins=max(5, int(len(np.unique(radii)) * 2)),
+            color="#008cff",
+            alpha=0.7,
+        )
+        ax_h.set_title("Picked radii distribution")
+        ax_h.set_xlabel("radius")
+        ax_h.set_ylabel("count")
+        st.pyplot(fig_h, use_container_width=True)
+
+        st.caption("Note: Rendering spheres can still be expensive.")
 
 
 if __name__ == "__main__":
