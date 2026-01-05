@@ -1,0 +1,43 @@
+[project]
+name = "pysson-disc"
+version = "0.1.0"
+description = "Poisson-disc sampling with variable radii"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["numpy>=2.3.0,<2.4", "numba>=0.62"]
+
+[dependency-groups]
+test = ["pytest>=8"]
+dev = ["ruff>=0.7", "streamlit>=1.40", "plotly>=5.24"]
+
+[project.scripts]
+pysson-disc = "pysson_disc.cli:cli"
+
+[tool.pyright]
+exclude = [".venv"]
+venvPath = ".venv"
+venv = "."
+
+[tool.ty.environment]
+python = "./.venv"
+
+[tool.ruff]
+lint.ignore = ["F722"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+norecursedirs = ["PyFracVAL", "docs", "docs/_build", ".devenv", ".venv"]
+markers = ["smoke: fast end-to-end sanity checks"]
+log_cli = false
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+[tool.uv.build-backend]
+module-name = "pysson_disc"
+module-root = ""
+
+[build-system]
+requires = ["uv_build >= 0.8.0, <0.10.0"]
+build-backend = "uv_build"
