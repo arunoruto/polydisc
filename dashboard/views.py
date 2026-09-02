@@ -76,6 +76,29 @@ _PAPER = "rgba(0,0,0,0)"
 _GRID = "rgba(128,128,128,0.25)"
 _INK = "0.5"
 
+#: Figure width in inches, and the range its height may take.  A
+#: cross-section of a carpet is thirty times wider than it is deep;
+#: sizing the figure at that true aspect leaves a sliver a few pixels
+#: tall with axis labels larger than the plot itself.  Clamping the
+#: figure while leaving the axes at equal aspect letterboxes the data
+#: instead, which stays readable and still shows circles as circles.
+_FIG_WIDTH = 9.0
+_FIG_HEIGHT_LIMITS = (2.5, 11.0)
+
+
+def _figure(width: float, height: float):
+    """Create a figure whose height is clamped to a readable range."""
+    inches = _FIG_WIDTH * float(height) / float(width)
+    return plt.subplots(
+        figsize=(_FIG_WIDTH, float(np.clip(inches, *_FIG_HEIGHT_LIMITS)))
+    )
+
+
+#: Approximate on-screen extent, in pixels, of the longest axis of the
+#: 3D scene.  Only used to turn radii in data units into Plotly's
+#: pixel-valued marker sizes; being roughly right is enough.
+_SCENE_PIXELS = 450.0
+
 
 def _transparent(figure, *axes) -> None:
     """Make a Matplotlib figure theme-agnostic."""
@@ -180,7 +203,7 @@ def plot_2d(pack: Packing, limit: int = 40_000) -> tuple[Figure, bool]:
     """
     points, radii, reduced = subsample(pack, limit)
 
-    figure, ax = plt.subplots(figsize=(9, 9 * float(pack.bounds[1] / pack.bounds[0])))
+    figure, ax = _figure(float(pack.bounds[0]), float(pack.bounds[1]))
     collection = _circles(
         ax, points, radii, float(pack.radii.min()), float(pack.radii.max())
     )
@@ -247,7 +270,7 @@ def plot_slice(
 
     width = float(pack.bounds[others[0]])
     height = float(pack.bounds[others[1]])
-    figure, ax = plt.subplots(figsize=(9, 9 * height / width))
+    figure, ax = _figure(width, height)
 
     if shown:
         collection = _circles(
@@ -302,10 +325,11 @@ def plot_3d(pack: Packing, limit: int = 20_000) -> tuple[go.Figure, bool]:
     """
     points, radii, reduced = subsample(pack, limit)
     span = float(np.max(pack.bounds))
-    # 46 px across the widest axis is about the point at which markers
-    # touch for a saturated packing, which reads as solid without hiding
-    # the structure behind it.
-    sizes = 46.0 * radii / span
+    # Plotly marker size is a diameter in screen pixels, so convert from
+    # data units: the longest axis occupies roughly _SCENE_PIXELS of the
+    # rendered scene. Clamped so a handful of huge particles cannot blot
+    # out the view and a very wide container still leaves them visible.
+    sizes = np.clip(2.0 * radii / span * _SCENE_PIXELS, 2.0, 40.0)
 
     figure = go.Figure(
         go.Scatter3d(
@@ -317,7 +341,13 @@ def plot_3d(pack: Packing, limit: int = 20_000) -> tuple[go.Figure, bool]:
                 "size": sizes,
                 "color": radii,
                 "colorscale": COLORSCALE,
-                "colorbar": {"title": "radius", "thickness": 12},
+                # Shortened and centred so it clears the modebar.
+                "colorbar": {
+                    "title": "radius",
+                    "thickness": 12,
+                    "len": 0.7,
+                    "y": 0.45,
+                },
                 "opacity": 0.9,
                 "line": {"width": 0},
             },

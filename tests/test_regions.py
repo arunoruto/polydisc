@@ -229,6 +229,33 @@ class TestCarpetRecipe:
         assert np.all(pack.points[:, 2] >= radius - 1e-12)
         assert np.all(pack.points[:, 2] <= 1.05 * radius + 1e-12)
         assert_no_overlaps(pack.points, pack.radii)
+        # Assert the carpet is actually full. Without this the test
+        # passes on a packing of one particle, which is exactly what a
+        # slab this thin used to produce.
+        coverage = float(np.sum(np.pi * pack.radii**2) / (120.0 * 120.0))
+        assert coverage > 0.4
+
+    @pytest.mark.parametrize("radius", [0.5, 2.0, 5.0])
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_a_monolayer_fills_whatever_the_seed(self, radius, seed) -> None:
+        # A slab barely thicker than one particle admits only a sliver of
+        # candidate directions. Charging the rest against Bridson's k
+        # retired the first active point immediately and the run stopped
+        # at a single particle, for every seed.
+        extent = 60.0 * radius
+        pack = sample([extent, extent, 2.05 * radius], radius, seed=seed)
+        coverage = float(np.sum(np.pi * pack.radii**2) / extent**2)
+        assert coverage > 0.4, f"carpet only reached {coverage:.3f} coverage"
+
+    def test_a_thin_box_fills_on_any_axis(self) -> None:
+        radius, extent = 2.0, 120.0
+        depth = 2.05 * radius
+        for axis in range(3):
+            bounds = [extent, extent, extent]
+            bounds[axis] = depth
+            pack = sample(bounds, radius, seed=0)
+            face = extent * extent
+            assert float(np.sum(np.pi * pack.radii**2) / face) > 0.35
 
     def test_spacing_needs_the_depth_pre_inflated(self) -> None:
         from polydisc.spacing import spacing_scale

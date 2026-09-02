@@ -351,19 +351,20 @@ has to live in that folder rather than the repo root.
 
 ## Performance
 
-Against the previous implementation, same seeds and same resulting
-packings (`scripts/benchmark.py`):
+Against the previous implementation, same seeds (`scripts/benchmark.py`):
 
 | case                          |     N |    old |    new | speedup |
 | ----------------------------- | ----: | -----: | -----: | ------: |
-| 2D 1000², r=5                 |   6.0k |  0.044 s |  0.016 s |    2.8× |
-| 2D 4000², r=1..5              | 729k |  8.63 s |  3.44 s |    2.5× |
-| 2D 500², r=0.25..5 (20×)      |  57k |  2.20 s |  0.57 s |    3.9× |
-| 3D 150³, r=1..5               |  59k |  6.77 s |  1.29 s |    5.2× |
-| 3D 60³, r=0.5..5 (10×)        |  23k |  9.76 s |  1.75 s |    5.6× |
-| 3D 300³, r=1..5               | 477k | 65.9 s | 15.6 s |    4.2× |
+| 2D 1000², r=5                 |  6.1k | 0.046 s | 0.017 s |    2.7× |
+| 2D 4000², r=1..5              |  729k |  8.60 s |  3.59 s |    2.4× |
+| 2D 500², r=0.25..5 (20×)      |   58k |  2.28 s |  0.55 s |    4.1× |
+| 3D 150³, r=1..5               |   61k |  6.90 s |  1.60 s |    4.3× |
+| 3D 60³, r=0.5..5 (10×)        |   24k |  9.89 s |  2.88 s |    3.4× |
+| 3D 300³, r=1..5               |  483k | 66.0 s | 17.4 s |    3.8× |
 
-Peak memory on the last row fell from 698 MB to 176 MB.
+Peak memory on the last row fell from 699 MB to 176 MB. Every row
+also packs *more* particles than before, so the speedup is measured
+against a denser result, not a cheaper one.
 
 Two changes account for most of it:
 
@@ -386,6 +387,14 @@ Two changes account for most of it:
 * Candidates are placed in the annulus `[r_i + r_j, 2(r_i + r_j)]` around
   the active point — Bridson's `[r, 2r]` generalised to two radii, with
   a uniform (not area-weighted) radial draw, which packs slightly denser.
+* A candidate that lands outside the container is a wasted draw, not a
+  failed placement, so it is redrawn rather than charged against
+  Bridson's `k`. In a 3D box the depth is handled exactly instead: by
+  Archimedes' hat-box theorem a uniform direction's `z` is uniform along
+  the axis, so drawing `z` directly inside the slab samples precisely
+  the in-slab directions with no rejection. Without this a monolayer
+  stops at a single particle — in a slab `2.05 · r` deep a blind
+  direction lands inside about one time in eighty.
 * Seeding is done *inside* the kernel. Numba's generator is separate
   from NumPy's, so calling `np.random.seed` from Python does not reach
   it; pass `seed=` instead. Omitting it draws one from NumPy's global

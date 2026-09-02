@@ -226,6 +226,48 @@ class TestViews:
         assert len(figure.data) == 1
         assert figure.layout.shapes  # the requested-spacing line
 
+    def test_markers_are_big_enough_to_see(self, packing_3d) -> None:
+        # Plotly marker size is a diameter in pixels, not data units.
+        # Deriving it from radii without that conversion produced
+        # sub-pixel markers and an apparently empty plot.
+        sizes = np.asarray(views.plot_3d(packing_3d)[0].data[0].marker.size)
+        assert sizes.min() >= 2.0
+        assert np.median(sizes) > 3.0
+
+    def test_markers_are_capped_for_a_tiny_container(self) -> None:
+        pack = sample([12.0, 12.0, 12.0], 2.0, seed=0)
+        sizes = np.asarray(views.plot_3d(pack)[0].data[0].marker.size)
+        assert sizes.max() <= 40.0
+
+    def test_marker_size_tracks_relative_radius(self) -> None:
+        pack = sample([60.0, 60.0, 60.0], [1.0, 3.0], seed=0)
+        figure, _ = views.plot_3d(pack)
+        sizes = np.asarray(figure.data[0].marker.size)
+        radii = np.asarray(figure.data[0].marker.color)
+        assert sizes[radii.argmax()] > sizes[radii.argmin()]
+
+    @pytest.mark.parametrize(
+        "bounds",
+        [[400.0, 20.0], [20.0, 400.0], [400.0, 400.0]],
+        ids=["very-wide", "very-tall", "square"],
+    )
+    def test_figure_height_stays_in_a_readable_range(self, bounds) -> None:
+        # A carpet cross-section is far wider than it is deep. Sizing the
+        # figure at that true aspect leaves a sliver whose axis labels are
+        # larger than the plot; the axes stay equal-aspect either way.
+        figure, _ = views.plot_2d(sample(bounds, 2.0, seed=0))
+        _, height = figure.get_size_inches()
+        assert 2.5 <= height <= 11.0
+        assert figure.axes[0].get_aspect() == 1.0
+
+    def test_slice_of_a_thin_carpet_is_readable(self) -> None:
+        pack = sample([120.0, 120.0, 4.1], 2.0, seed=0)
+        assert pack.n > 100, "the carpet itself failed to fill"
+        figure, shown = views.plot_slice(pack, 0, 60.0, 6.0)
+        _, height = figure.get_size_inches()
+        assert shown > 0
+        assert height >= 2.5
+
     def test_subsample_is_deterministic(self, packing_2d) -> None:
         first, _, _ = views.subsample(packing_2d, 20)
         second, _, _ = views.subsample(packing_2d, 20)

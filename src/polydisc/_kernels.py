@@ -34,6 +34,14 @@ from numba import njit, prange
 
 TWO_PI = 6.283185307179586
 
+#: Directions tried per candidate before giving up on landing inside the
+#: container.  A candidate that falls outside is not a failed placement,
+#: it is a wasted draw, so charging it against Bridson's ``k`` retires
+#: the active point for the wrong reason.  In a slab barely thicker than
+#: one particle only a sliver of directions can land inside at all, and
+#: without this a monodisperse carpet stops after its very first point.
+_BOUNDS_RETRIES = 16
+
 #: Fill an axis-aligned box; see :class:`polydisc.regions.Box`.
 REGION_BOX = 0
 #: Fill a ball inscribed in the box; see :class:`polydisc.regions.Ball`.
@@ -187,18 +195,27 @@ def _sample_2d(
 
             # Candidate in the annulus [r_sum, 2 * r_sum] around the
             # active point, with r_sum = pr + tr the contact distance.
-            theta = TWO_PI * np.random.random()
-            dist = (pr + tr) * (1.0 + np.random.random())
-            tx = px + dist * np.cos(theta)
-            ty = py + dist * np.sin(theta)
+            # Redrawing the direction until it lands inside samples the
+            # same annulus-intersect-container region as rejecting would;
+            # it just does not spend a candidate doing so.
+            tx = 0.0
+            ty = 0.0
+            outside = True
+            for _ in range(_BOUNDS_RETRIES):
+                theta = TWO_PI * np.random.random()
+                dist = (pr + tr) * (1.0 + np.random.random())
+                tx = px + dist * np.cos(theta)
+                ty = py + dist * np.sin(theta)
 
-            if region == REGION_BALL:
-                ddx = tx - hx
-                ddy = ty - hy
-                span = hx - tr
-                outside = ddx * ddx + ddy * ddy > span * span
-            else:
-                outside = tx < tr or tx > bx - tr or ty < tr or ty > by - tr
+                if region == REGION_BALL:
+                    ddx = tx - hx
+                    ddy = ty - hy
+                    span = hx - tr
+                    outside = ddx * ddx + ddy * ddy > span * span
+                else:
+                    outside = tx < tr or tx > bx - tr or ty < tr or ty > by - tr
+                if not outside:
+                    break
             if outside:
                 continue
 
@@ -349,28 +366,45 @@ def _sample_3d(
         for _ in range(k):
             tr = _draw_radius(kind, values, cdf, p0, p1, rmin, rmax)
 
-            ux, uy, uz = _random_direction_3d()
+            tx = 0.0
+            ty = 0.0
+            tz = 0.0
+            outside = True
+            for _ in range(_BOUNDS_RETRIES):
+                dist = (pr + tr) * (1.0 + np.random.random())
 
-            dist = (pr + tr) * (1.0 + np.random.random())
-            tx = px + dist * ux
-            ty = py + dist * uy
-            tz = pz + dist * uz
-
-            if region == REGION_BALL:
-                ddx = tx - hx
-                ddy = ty - hy
-                ddz = tz - hz
-                span = hx - tr
-                outside = ddx * ddx + ddy * ddy + ddz * ddz > span * span
-            else:
-                outside = (
-                    tx < tr
-                    or tx > bx - tr
-                    or ty < tr
-                    or ty > by - tr
-                    or tz < tr
-                    or tz > bz - tr
-                )
+                if region == REGION_BALL:
+                    ux, uy, uz = _random_direction_3d()
+                    tx = px + dist * ux
+                    ty = py + dist * uy
+                    tz = pz + dist * uz
+                    ddx = tx - hx
+                    ddy = ty - hy
+                    ddz = tz - hz
+                    span = hx - tr
+                    outside = ddx * ddx + ddy * ddy + ddz * ddz > span * span
+                else:
+                    # Archimedes' hat-box theorem: for a direction drawn
+                    # uniformly on the sphere, the z coordinate is
+                    # uniform along the axis.  So drawing z directly
+                    # inside the slab, with the azimuth still uniform,
+                    # samples *exactly* the in-slab directions -- no
+                    # rejection at all.  That is what lets a carpet fill:
+                    # in a box barely thicker than one particle, a blind
+                    # direction lands inside perhaps one time in eighty.
+                    zlo = max(pz - dist, tr)
+                    zhi = min(pz + dist, bz - tr)
+                    if zhi < zlo:
+                        continue
+                    tz = zlo + np.random.random() * (zhi - zlo)
+                    uz = (tz - pz) / dist
+                    horizontal = dist * np.sqrt(max(1.0 - uz * uz, 0.0))
+                    theta = TWO_PI * np.random.random()
+                    tx = px + horizontal * np.cos(theta)
+                    ty = py + horizontal * np.sin(theta)
+                    outside = tx < tr or tx > bx - tr or ty < tr or ty > by - tr
+                if not outside:
+                    break
             if outside:
                 continue
 
