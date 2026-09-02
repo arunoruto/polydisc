@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from conftest import assert_inside, assert_no_overlaps, brute_force_min_gaps
+from packing_asserts import assert_inside, assert_no_overlaps, brute_force_min_gaps
 
 from polydisc.sampling import sample
 from polydisc.spacing import apply_spacing, expected_gap, spacing_scale

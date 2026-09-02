@@ -8,7 +8,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import numpy as np
 
@@ -198,13 +198,15 @@ class Packing:
         return out
 
     @classmethod
-    def load(cls, path: str | Path) -> Packing:
+    def load(cls, path: str | Path | IO[bytes]) -> Packing:
         """Read a packing back from a ``.npz`` archive.
 
         Parameters
         ----------
-        path : str or pathlib.Path
-            An archive written by :meth:`save`.
+        path : str or pathlib.Path or file-like
+            An archive written by :meth:`save`.  A binary file object is
+            accepted too, so an upload can be read without touching
+            disk.
 
         Returns
         -------
@@ -213,8 +215,15 @@ class Packing:
             the stored metadata where possible, falling back to a box
             over the stored bounds and a discrete spec over the realised
             radii otherwise.
+
+        Raises
+        ------
+        KeyError
+            If the archive lacks the ``points``, ``radii`` or ``bounds``
+            arrays.
         """
-        with np.load(Path(path), allow_pickle=False) as data:
+        source = Path(path) if isinstance(path, (str, Path)) else path
+        with np.load(source, allow_pickle=False) as data:
             points = np.asarray(data["points"], dtype=np.float64)
             radii = np.asarray(data["radii"], dtype=np.float64)
             bounds = np.asarray(data["bounds"], dtype=np.float64)

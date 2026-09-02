@@ -22,17 +22,19 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/arunoruto/polydisc"
 
-[dependency-groups]
-test = ["pytest>=8"]
-dev = [
-    "ruff>=0.7",
+[project.optional-dependencies]
+# Everything the dashboard needs on top of the library itself. Kept out
+# of the core dependencies so `pip install polydisc` stays small for the
+# many users who only want the sampler.
+dashboard = [
     "streamlit>=1.40",
     "plotly>=5.24",
-    "altair>=5",
-    "pyvista>=0.46",
-    "stpyvista>=0.1",
     "matplotlib>=3.9",
 ]
+
+[dependency-groups]
+test = ["pytest>=8"]
+dev = ["ruff>=0.16", "polydisc[dashboard]"]
 
 [project.scripts]
 polydisc = "polydisc.cli:cli"
@@ -49,9 +51,15 @@ python = "./.venv"
 lint.ignore = ["F722"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "src/polydisc", "README.md"]
+testpaths = ["tests", "src/polydisc", "dashboard", "README.md"]
+# Neither folder is a package, so put both on the path: the dashboard
+# imports its own siblings, and the tests import packing_asserts.
+pythonpath = ["dashboard", "tests"]
 python_files = "test_*.py"
-addopts = "--doctest-modules --doctest-glob=*.md --ignore=src/polydisc/app_streamlit.py"
+# importlib import mode keeps same-named modules in different folders
+# apart -- with --doctest-modules there are two conftest.py files to
+# collect, and the legacy prepend mode cannot tell them apart.
+addopts = "--doctest-modules --doctest-glob=*.md --import-mode=importlib"
 doctest_optionflags = "NORMALIZE_WHITESPACE ELLIPSIS"
 norecursedirs = ["docs", "docs/_build", ".devenv", ".venv", "reference"]
 markers = ["slow: benchmarks and saturation runs that take seconds"]

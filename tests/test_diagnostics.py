@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 import pytest
-from conftest import brute_force_min_gaps
+from packing_asserts import brute_force_min_gaps
 
 from polydisc.diagnostics import (
     gap_report,

@@ -6,12 +6,11 @@
 {
   env = {
     UV_PYTHON = toString config.languages.python.package.interpreter;
-    PYVISTA_OFF_SCREEN = true;
   };
 
   scripts = {
     polydisc.exec = ''uv run polydisc "$@"'';
-    inspector.exec = ''uv run streamlit run src/polydisc/app_streamlit.py'';
+    dashboard.exec = ''uv run streamlit run dashboard/app.py'';
     bench.exec = ''uv run python scripts/benchmark.py "$@"'';
   };
 

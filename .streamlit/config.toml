@@ -1,0 +1,11 @@
+# Applies to `streamlit run` from the repo root and to Streamlit
+# Community Cloud, which reads the repo root's .streamlit directory.
+
+[theme]
+# No `base` on purpose: the dashboard follows the viewer's light/dark
+# setting, and its figures are drawn transparently to match.
+primaryColor = "#4c78a8"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 import pytest
-from conftest import assert_no_overlaps
+from packing_asserts import assert_no_overlaps
 
 from polydisc.radii import RadiusSpec
 from polydisc.regions import (

@@ -1,0 +1,16 @@
+# Streamlit Community Cloud reads this file because a dependency file in
+# the entrypoint's directory takes precedence over anything in the repo
+# root. That matters here: Community Cloud does not read uv.lock, and it
+# assumes any pyproject.toml is Poetry format, which this project is not.
+#
+# polydisc itself is not installed -- app.py imports it from ../src -- so
+# its runtime dependencies are listed alongside the dashboard extra.
+# tests/test_dashboard.py checks this stays in step with pyproject.toml.
+
+numpy>=2.3.0,<2.4
+numba>=0.62
+click>=8.1
+pyyaml>=6.0
+streamlit>=1.40
+plotly>=5.24
+matplotlib>=3.9

@@ -15,7 +15,17 @@ Formerly `pysson-disc`.
 ## Install
 
 ```sh
-uv sync            # or: devenv shell
+pip install polydisc                # the sampler
+pip install 'polydisc[dashboard]'   # ... plus the Streamlit dashboard
+```
+
+Streamlit is an optional extra: the library itself pulls in nothing but
+NumPy, Numba, Click and PyYAML.
+
+For development:
+
+```sh
+uv sync            # or: devenv shell -- the dev group includes the extra
 ```
 
 Development uses [devenv](https://devenv.sh); `direnv allow` picks it up
@@ -320,14 +330,24 @@ ball_radius = 200.0
 polydisc generate --config packing.toml --profile sparse --out sparse.npz
 ```
 
-## Interactive inspector
+## Dashboard
 
 ```sh
-streamlit run src/polydisc/app_streamlit.py
+streamlit run dashboard/app.py      # or: `dashboard` inside devenv shell
 ```
 
-Container and distribution controls, a 2D/3D view, the realised radius
-histogram against the requested density, and the full report.
+Generate packings interactively, or **upload a `.npz` or `.csv`** from
+`polydisc generate` and inspect it: true-scale 2D views, an interactive
+3D point cloud, true-scale cross-sections of a 3D packing, the realised
+size distribution against the requested one, nearest-neighbour
+clearances against the requested spacing, and downloads.
+
+The dashboard lives in [`dashboard/`](dashboard/) as plain scripts, not
+inside the package, so it can be deployed to
+[Streamlit Community Cloud](https://share.streamlit.io) by pointing an
+app at `dashboard/app.py`. See [`dashboard/README.md`](dashboard/README.md)
+for the deployment details — in particular why the requirements file
+has to live in that folder rather than the repo root.
 
 ## Performance
 
@@ -384,7 +404,7 @@ src/polydisc/
     spacing.py        spacing -> scale factor
     diagnostics.py    realised radii, gaps, report
     cli.py            polydisc command
-    app_streamlit.py  interactive inspector
+dashboard/            Streamlit app (optional extra, deployable)
 reference/            original MATLAB implementation
 scripts/              example plots and the benchmark
 ```
