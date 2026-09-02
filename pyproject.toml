@@ -1,9 +1,17 @@
 [project]
-name = "pysson-disc"
-version = "0.1.0"
-description = "Poisson-disc sampling with variable radii"
+name = "polydisc"
+version = "0.2.0"
+description = "Polydisperse Poisson-disc sampling for discs, spheres and flat carpets"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "MIT"
+authors = [{ name = "Mirza Arnaut" }]
+keywords = ["poisson-disc", "bridson", "packing", "polydisperse", "numba"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
     "numpy>=2.3.0,<2.4",
     "numba>=0.62",
@@ -11,12 +19,23 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/arunoruto/polydisc"
+
 [dependency-groups]
 test = ["pytest>=8"]
-dev = ["ruff>=0.7", "streamlit>=1.40", "plotly>=5.24", "altair>=5", "pyvista>=0.46", "stpyvista>=0.1"]
+dev = [
+    "ruff>=0.7",
+    "streamlit>=1.40",
+    "plotly>=5.24",
+    "altair>=5",
+    "pyvista>=0.46",
+    "stpyvista>=0.1",
+    "matplotlib>=3.9",
+]
 
 [project.scripts]
-pysson-disc = "pysson_disc.cli:cli"
+polydisc = "polydisc.cli:cli"
 
 [tool.pyright]
 exclude = [".venv"]
@@ -30,19 +49,21 @@ python = "./.venv"
 lint.ignore = ["F722"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "src/polydisc", "README.md"]
 python_files = "test_*.py"
-norecursedirs = ["PyFracVAL", "docs", "docs/_build", ".devenv", ".venv"]
-markers = ["smoke: fast end-to-end sanity checks"]
+addopts = "--doctest-modules --doctest-glob=*.md --ignore=src/polydisc/app_streamlit.py"
+doctest_optionflags = "NORMALIZE_WHITESPACE ELLIPSIS"
+norecursedirs = ["docs", "docs/_build", ".devenv", ".venv", "reference"]
+markers = ["slow: benchmarks and saturation runs that take seconds"]
 log_cli = false
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
 [tool.uv.build-backend]
-module-name = "pysson_disc"
-module-root = ""
+module-name = "polydisc"
+module-root = "src"
 
 [build-system]
-requires = ["uv_build >= 0.8.0, <0.10.0"]
+requires = ["uv_build >= 0.8.0, <0.13.0"]
 build-backend = "uv_build"

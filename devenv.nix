@@ -10,7 +10,9 @@
   };
 
   scripts = {
-    pysson-disc.exec = ''uv run pysson-disc "$@"'';
+    polydisc.exec = ''uv run polydisc "$@"'';
+    inspector.exec = ''uv run streamlit run src/polydisc/app_streamlit.py'';
+    bench.exec = ''uv run python scripts/benchmark.py "$@"'';
   };
 
   enterShell = ''
