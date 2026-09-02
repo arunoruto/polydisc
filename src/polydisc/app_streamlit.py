@@ -17,10 +17,11 @@ from matplotlib.collections import PatchCollection
 from matplotlib.patches import Circle
 from stpyvista import stpyvista
 
-from polydisc.carpet import carpet, monolayer_thickness
 from polydisc.diagnostics import report
 from polydisc.radii import RadiusSpec
+from polydisc.regions import Ball, Box, Region
 from polydisc.sampling import Packing, sample
+from polydisc.spacing import spacing_scale
 
 
 def _radius_spec_controls() -> RadiusSpec:
@@ -104,6 +105,17 @@ def _plot_2d(pack: Packing, show_discs: bool) -> None:
     ax.set_aspect("equal", adjustable="box")
     ax.tick_params(axis="both", labelbottom=False, labelleft=False)
 
+    if isinstance(pack.region, Ball):
+        ax.add_patch(
+            Circle(
+                tuple(pack.region.centre),
+                pack.region.radius,
+                fill=False,
+                edgecolor="0.4",
+                linewidth=1.0,
+            )
+        )
+
     if show_discs:
         # One PatchCollection, not N patches: an artist per particle is
         # what makes a 100k-particle plot unusable.
@@ -134,13 +146,16 @@ def _plot_3d(pack: Packing, resolution: int) -> None:
     """Draw a 3D packing with PyVista sphere glyphs."""
     plotter = pv.Plotter(window_size=[900, 700], off_screen=True)
 
-    box = pv.Cube(
-        center=tuple(float(b) / 2.0 for b in pack.bounds),
-        x_length=float(pack.bounds[0]),
-        y_length=float(pack.bounds[1]),
-        z_length=float(pack.bounds[2]),
-    )
-    plotter.add_mesh(box, style="wireframe", color="white", opacity=0.35)
+    if isinstance(pack.region, Ball):
+        outline = pv.Sphere(radius=pack.region.radius, center=tuple(pack.region.centre))
+    else:
+        outline = pv.Cube(
+            center=tuple(float(b) / 2.0 for b in pack.bounds),
+            x_length=float(pack.bounds[0]),
+            y_length=float(pack.bounds[1]),
+            z_length=float(pack.bounds[2]),
+        )
+    plotter.add_mesh(outline, style="wireframe", color="white", opacity=0.35)
 
     cloud = pv.PolyData(pack.points)
     cloud["radius"] = pack.radii
@@ -194,12 +209,21 @@ def main() -> None:
         pv.start_xvfb()
 
     st.title("polydisc")
-    st.caption("Polydisperse Poisson-disc sampling for discs, spheres and carpets.")
+    st.caption("Polydisperse Poisson-disc sampling for discs and spheres.")
 
     with st.sidebar:
-        mode = st.radio("mode", ["2D box", "3D box", "carpet"], index=0)
+        mode = st.radio(
+            "container",
+            ["2D box", "3D box", "ball", "carpet (thin box)"],
+            index=0,
+            help="A carpet is not a separate shape -- it is a box whose "
+            "depth is about one particle diameter.",
+        )
 
-        if mode == "2D box":
+        if mode == "ball":
+            ball_radius = st.number_input("ball radius", 1.0, value=60.0, step=5.0)
+            ball_dims = st.radio("dimensions", [2, 3], index=1, horizontal=True)
+        elif mode == "2D box":
             width = st.number_input("width", 1.0, value=200.0, step=10.0)
             height = st.number_input("height", 1.0, value=150.0, step=10.0)
         else:
@@ -220,21 +244,22 @@ def main() -> None:
             "neighbouring surfaces. Positions are scaled; radii are not.",
         )
         fit_bounds = st.checkbox(
-            "keep requested extent",
+            "keep requested size",
             value=True,
-            help="Off: the domain grows by the spacing factor instead "
+            help="Off: the container grows by the spacing factor instead "
             "(PyFracVAL behaviour).",
         )
 
-        if mode == "carpet":
+        if mode == "carpet (thin box)":
             auto = st.checkbox("thinnest monolayer", value=True)
             if auto:
-                depth = monolayer_thickness(
-                    spec, spacing=spacing, fit_bounds=fit_bounds
-                )
-                st.caption(f"thickness = {depth:.4g}")
+                # A monolayer needs its depth pre-inflated by the spacing
+                # factor, or the pre-shrink leaves no room for a particle.
+                inflate = spacing_scale(spacing) if fit_bounds else 1.0
+                depth = 2.05 * spec.rmax * inflate
+                st.caption(f"depth = {depth:.4g}")
             else:
-                depth = st.number_input("thickness", 0.01, value=10.0, step=1.0)
+                depth = st.number_input("depth", 0.01, value=10.0, step=1.0)
 
         repetitions = st.slider("repetitions (k)", 1, 60, 30)
         seed = int(st.number_input("seed", 0, 10_000_000, 0, 1))
@@ -250,36 +275,23 @@ def main() -> None:
         st.info("Adjust the settings and press Generate.")
         return
 
+    if mode == "ball":
+        region: Region = Ball(ball_radius, ball_dims)
+    elif mode == "2D box":
+        region = Box([width, height])
+    else:
+        region = Box([width, height, depth])
+
     try:
         with st.spinner("Sampling..."):
-            if mode == "2D box":
-                pack = sample(
-                    [width, height],
-                    spec,
-                    repetitions=repetitions,
-                    seed=seed,
-                    spacing=spacing,
-                    fit_bounds=fit_bounds,
-                )
-            elif mode == "3D box":
-                pack = sample(
-                    [width, height, depth],
-                    spec,
-                    repetitions=repetitions,
-                    seed=seed,
-                    spacing=spacing,
-                    fit_bounds=fit_bounds,
-                )
-            else:
-                pack = carpet(
-                    (width, height),
-                    thickness=depth,
-                    radii=spec,
-                    repetitions=repetitions,
-                    seed=seed,
-                    spacing=spacing,
-                    fit_bounds=fit_bounds,
-                )
+            pack = sample(
+                region,
+                spec,
+                repetitions=repetitions,
+                seed=seed,
+                spacing=spacing,
+                fit_bounds=fit_bounds,
+            )
     except ValueError as exc:
         st.error(str(exc))
         return
@@ -303,9 +315,9 @@ def main() -> None:
 
     if abs(rep.boundary_bias.get("bias") or 0.0) > 0.05:
         st.warning(
-            "The box geometry is choosing the sizes: it shifts the mean "
-            f"radius {rep.boundary_bias['bias'] * 100:+.1f}% before any "
-            "crowding. Widen the box or narrow the radius range."
+            "The container geometry is choosing the sizes: it shifts the "
+            f"mean radius {rep.boundary_bias['bias'] * 100:+.1f}% before any "
+            "crowding. Enlarge it or narrow the radius range."
         )
 
     if pack.n == 0:

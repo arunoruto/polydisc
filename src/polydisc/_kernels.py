@@ -34,6 +34,11 @@ from numba import njit, prange
 
 TWO_PI = 6.283185307179586
 
+#: Fill an axis-aligned box; see :class:`polydisc.regions.Box`.
+REGION_BOX = 0
+#: Fill a ball inscribed in the box; see :class:`polydisc.regions.Ball`.
+REGION_BALL = 1
+
 #: Sampling ran until the active list emptied (a saturated packing).
 STATUS_SATURATED = 0
 #: Sampling stopped early because ``max_points`` was reached.
@@ -76,6 +81,23 @@ def _draw_radius(kind, values, cdf, p0, p1, rmin, rmax):
 
 
 @njit(cache=True)
+def _random_direction_3d():
+    """Draw a uniform direction on the unit sphere.
+
+    Marsaglia (1972): two uniforms, no trigonometry and no temporary
+    array, which matters in a loop run millions of times.
+    """
+    while True:
+        u1 = 2.0 * np.random.random() - 1.0
+        u2 = 2.0 * np.random.random() - 1.0
+        s = u1 * u1 + u2 * u2
+        if s < 1.0:
+            break
+    f = 2.0 * np.sqrt(1.0 - s)
+    return u1 * f, u2 * f, 1.0 - 2.0 * s
+
+
+@njit(cache=True)
 def _draw_radii(count, kind, values, cdf, p0, p1, rmin, rmax, seed):
     """Draw `count` independent radii from one distribution.
 
@@ -90,11 +112,17 @@ def _draw_radii(count, kind, values, cdf, p0, p1, rmin, rmax, seed):
 
 
 @njit(cache=True)
-def _sample_2d(bx, by, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_points):
-    """Sample non-overlapping discs in the box ``[0, bx] x [0, by]``.
+def _sample_2d(
+    bx, by, region, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_points
+):
+    """Sample non-overlapping discs inside a 2D region.
+
+    The region is either the box ``[0, bx] x [0, by]`` or the disc
+    inscribed in it, selected by `region`; the acceleration grid spans
+    the box either way, which just leaves the corner cells empty.
 
     Returns ``(points, radii, status)``; see :data:`STATUS_SATURATED`.
-    Callers must guarantee ``2 * rmax < min(bx, by)``.
+    Callers must guarantee that the largest particle fits.
     """
     np.random.seed(seed)
 
@@ -102,6 +130,10 @@ def _sample_2d(bx, by, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_point
     nx = max(1, int(np.ceil(bx / cell)))
     ny = max(1, int(np.ceil(by / cell)))
     head = np.full(nx * ny, -1, dtype=np.int64)
+
+    # Ball centre and radius, unused for a box region.
+    hx = 0.5 * bx
+    hy = 0.5 * by
 
     cap = min(max_points, 1024)
     pts = np.empty((cap, 2), dtype=np.float64)
@@ -111,10 +143,19 @@ def _sample_2d(bx, by, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_point
     acap = min(max_points, 1024)
     active = np.empty(acap, dtype=np.int64)
 
-    # Seed point: uniform over the region where a disc of this radius fits.
+    # Seed point: uniform over the region where a disc of this radius
+    # fits.  For a ball that shrunken region is itself a disc, sampled
+    # directly rather than by rejection -- rejection would stall when
+    # the particle nearly fills the container.
     r0 = _draw_radius(kind, values, cdf, p0, p1, rmin, rmax)
-    x0 = r0 + np.random.random() * (bx - 2.0 * r0)
-    y0 = r0 + np.random.random() * (by - 2.0 * r0)
+    if region == REGION_BALL:
+        theta = TWO_PI * np.random.random()
+        span = (hx - r0) * np.sqrt(np.random.random())
+        x0 = hx + span * np.cos(theta)
+        y0 = hy + span * np.sin(theta)
+    else:
+        x0 = r0 + np.random.random() * (bx - 2.0 * r0)
+        y0 = r0 + np.random.random() * (by - 2.0 * r0)
 
     cx = min(nx - 1, max(0, int(x0 / cell)))
     cy = min(ny - 1, max(0, int(y0 / cell)))
@@ -151,7 +192,14 @@ def _sample_2d(bx, by, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_point
             tx = px + dist * np.cos(theta)
             ty = py + dist * np.sin(theta)
 
-            if tx < tr or tx > bx - tr or ty < tr or ty > by - tr:
+            if region == REGION_BALL:
+                ddx = tx - hx
+                ddy = ty - hy
+                span = hx - tr
+                outside = ddx * ddx + ddy * ddy > span * span
+            else:
+                outside = tx < tr or tx > bx - tr or ty < tr or ty > by - tr
+            if outside:
                 continue
 
             cx = min(nx - 1, max(0, int(tx / cell)))
@@ -226,11 +274,16 @@ def _sample_2d(bx, by, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_point
 
 
 @njit(cache=True)
-def _sample_3d(bx, by, bz, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_points):
-    """Sample non-overlapping spheres in ``[0, bx] x [0, by] x [0, bz]``.
+def _sample_3d(
+    bx, by, bz, region, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_points
+):
+    """Sample non-overlapping spheres inside a 3D region.
 
-    Returns ``(points, radii, status)``.  Callers must guarantee
-    ``2 * rmax < min(bx, by, bz)``.
+    The region is either the box ``[0, bx] x [0, by] x [0, bz]`` or the
+    ball inscribed in it, selected by `region`.
+
+    Returns ``(points, radii, status)``.  Callers must guarantee that
+    the largest particle fits.
     """
     np.random.seed(seed)
 
@@ -239,6 +292,11 @@ def _sample_3d(bx, by, bz, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_p
     ny = max(1, int(np.ceil(by / cell)))
     nz = max(1, int(np.ceil(bz / cell)))
     head = np.full(nx * ny * nz, -1, dtype=np.int64)
+
+    # Ball centre and radius, unused for a box region.
+    hx = 0.5 * bx
+    hy = 0.5 * by
+    hz = 0.5 * bz
 
     cap = min(max_points, 1024)
     pts = np.empty((cap, 3), dtype=np.float64)
@@ -249,9 +307,16 @@ def _sample_3d(bx, by, bz, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_p
     active = np.empty(acap, dtype=np.int64)
 
     r0 = _draw_radius(kind, values, cdf, p0, p1, rmin, rmax)
-    x0 = r0 + np.random.random() * (bx - 2.0 * r0)
-    y0 = r0 + np.random.random() * (by - 2.0 * r0)
-    z0 = r0 + np.random.random() * (bz - 2.0 * r0)
+    if region == REGION_BALL:
+        ux, uy, uz = _random_direction_3d()
+        span = (hx - r0) * np.cbrt(np.random.random())
+        x0 = hx + span * ux
+        y0 = hy + span * uy
+        z0 = hz + span * uz
+    else:
+        x0 = r0 + np.random.random() * (bx - 2.0 * r0)
+        y0 = r0 + np.random.random() * (by - 2.0 * r0)
+        z0 = r0 + np.random.random() * (bz - 2.0 * r0)
 
     cx = min(nx - 1, max(0, int(x0 / cell)))
     cy = min(ny - 1, max(0, int(y0 / cell)))
@@ -284,30 +349,29 @@ def _sample_3d(bx, by, bz, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_p
         for _ in range(k):
             tr = _draw_radius(kind, values, cdf, p0, p1, rmin, rmax)
 
-            # Marsaglia (1972): a uniform direction on the unit sphere
-            # from two uniforms, with no trigonometry and no temporary
-            # array.
-            while True:
-                u1 = 2.0 * np.random.random() - 1.0
-                u2 = 2.0 * np.random.random() - 1.0
-                s = u1 * u1 + u2 * u2
-                if s < 1.0:
-                    break
-            f = 2.0 * np.sqrt(1.0 - s)
-            ux = u1 * f
-            uy = u2 * f
-            uz = 1.0 - 2.0 * s
+            ux, uy, uz = _random_direction_3d()
 
             dist = (pr + tr) * (1.0 + np.random.random())
             tx = px + dist * ux
             ty = py + dist * uy
             tz = pz + dist * uz
 
-            if tx < tr or tx > bx - tr:
-                continue
-            if ty < tr or ty > by - tr:
-                continue
-            if tz < tr or tz > bz - tr:
+            if region == REGION_BALL:
+                ddx = tx - hx
+                ddy = ty - hy
+                ddz = tz - hz
+                span = hx - tr
+                outside = ddx * ddx + ddy * ddy + ddz * ddz > span * span
+            else:
+                outside = (
+                    tx < tr
+                    or tx > bx - tr
+                    or ty < tr
+                    or ty > by - tr
+                    or tz < tr
+                    or tz > bz - tr
+                )
+            if outside:
                 continue
 
             cx = min(nx - 1, max(0, int(tx / cell)))

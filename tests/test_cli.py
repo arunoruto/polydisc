@@ -184,7 +184,7 @@ class TestGenerateErrors:
     def test_bad_bounds_length(self, runner) -> None:
         result = runner.invoke(cli, ["generate", "--bounds", "10", "--radii", "3"])
         assert result.exit_code != 0
-        assert "2 or 3 numbers" in result.output
+        assert "2 or 3 entries" in result.output
 
     def test_particle_too_large(self, runner) -> None:
         result = runner.invoke(cli, ["generate", "--bounds", "10,10", "--radii", "8"])
@@ -309,15 +309,17 @@ class TestConfig:
         assert ".toml" in result.output
 
 
-class TestCarpet:
-    def test_defaults_to_a_monolayer(self, runner, tmp_path) -> None:
-        out = tmp_path / "carpet.npz"
+class TestBallContainer:
+    def test_fills_a_ball(self, runner, tmp_path) -> None:
+        out = tmp_path / "ball.npz"
         result = runner.invoke(
             cli,
             [
-                "carpet",
-                "--extent",
-                "60,60",
+                "generate",
+                "--shape",
+                "ball",
+                "--ball-radius",
+                "30",
                 "--radii",
                 "2",
                 "--seed",
@@ -328,19 +330,23 @@ class TestCarpet:
         )
         assert result.exit_code == 0, result.output
         pack = Packing.load(out)
-        assert pack.dimensions == 3
-        assert pack.bounds[2] == pytest.approx(4.0 * 1.02)
+        assert pack.region.describe() == {
+            "shape": "ball",
+            "radius": 30.0,
+            "dimensions": 3,
+        }
+        assert np.all(pack.region.contains(pack.points, pack.radii))
 
-    def test_explicit_thickness(self, runner, tmp_path) -> None:
-        out = tmp_path / "carpet.npz"
+    def test_sphere_is_accepted_as_a_synonym(self, runner, tmp_path) -> None:
+        out = tmp_path / "ball.npz"
         result = runner.invoke(
             cli,
             [
-                "carpet",
-                "--extent",
-                "60,60",
-                "--thickness",
-                "12",
+                "generate",
+                "--shape",
+                "sphere",
+                "--ball-radius",
+                "20",
                 "--radii",
                 "2",
                 "--seed",
@@ -350,18 +356,116 @@ class TestCarpet:
             ],
         )
         assert result.exit_code == 0, result.output
-        np.testing.assert_allclose(Packing.load(out).bounds, [60.0, 60.0, 12.0])
+        assert Packing.load(out).region.describe()["shape"] == "ball"
 
-    def test_monolayer_default_survives_spacing(self, runner, tmp_path) -> None:
+    def test_two_dimensional_ball(self, runner, tmp_path) -> None:
+        out = tmp_path / "disc.npz"
+        result = runner.invoke(
+            cli,
+            [
+                "generate",
+                "--shape",
+                "ball",
+                "--ball-radius",
+                "25",
+                "--dims",
+                "2",
+                "--radii",
+                "2",
+                "--seed",
+                "0",
+                "--out",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        pack = Packing.load(out)
+        assert pack.dimensions == 2
+        assert pack.region.radius == pytest.approx(25.0)
+
+    def test_ball_needs_a_radius(self, runner) -> None:
+        result = runner.invoke(cli, ["generate", "--shape", "ball", "--radii", "2"])
+        assert result.exit_code != 0
+        assert "--ball-radius" in result.output
+
+    def test_report_names_the_shape(self, runner) -> None:
+        result = runner.invoke(
+            cli,
+            [
+                "generate",
+                "--shape",
+                "ball",
+                "--ball-radius",
+                "20",
+                "--radii",
+                "2",
+                "--seed",
+                "0",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ball, radius 20" in result.stderr
+
+    def test_ball_from_config(self, runner, tmp_path) -> None:
+        cfg = tmp_path / "cfg.toml"
+        cfg.write_text('shape = "ball"\nball_radius = 20.0\nradii = [2.0]\nseed = 0\n')
+        out = tmp_path / "ball.npz"
+        result = runner.invoke(
+            cli, ["generate", "--config", str(cfg), "--out", str(out)]
+        )
+        assert result.exit_code == 0, result.output
+        assert Packing.load(out).region.radius == pytest.approx(20.0)
+
+
+class TestCarpetRecipe:
+    def test_a_thin_box_needs_no_special_command(self, runner, tmp_path) -> None:
         out = tmp_path / "carpet.npz"
         result = runner.invoke(
             cli,
             [
-                "carpet",
-                "--extent",
-                "60,60",
+                "generate",
+                "--bounds",
+                "80,80,4.1",
                 "--radii",
-                "1,2",
+                "2",
+                "--seed",
+                "0",
+                "--out",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        pack = Packing.load(out)
+        np.testing.assert_allclose(pack.bounds, [80.0, 80.0, 4.1])
+        assert np.all(pack.points[:, 2] <= 2.1 + 1e-9)
+
+    def test_spacing_needs_the_depth_pre_inflated(self, runner, tmp_path) -> None:
+        too_thin = runner.invoke(
+            cli,
+            [
+                "generate",
+                "--bounds",
+                "80,80,4.1",
+                "--radii",
+                "2",
+                "--spacing",
+                "2",
+                "--seed",
+                "0",
+            ],
+        )
+        assert too_thin.exit_code != 0
+        assert "does not fit" in too_thin.output
+
+        out = tmp_path / "carpet.npz"
+        ok = runner.invoke(
+            cli,
+            [
+                "generate",
+                "--bounds",
+                "80,80,8.2",
+                "--radii",
+                "2",
                 "--spacing",
                 "2",
                 "--seed",
@@ -370,13 +474,8 @@ class TestCarpet:
                 str(out),
             ],
         )
-        assert result.exit_code == 0, result.output
-        assert Packing.load(out).radii.max() == 2.0
-
-    def test_extent_must_have_two_values(self, runner) -> None:
-        result = runner.invoke(cli, ["carpet", "--extent", "60,60,60", "--radii", "2"])
-        assert result.exit_code != 0
-        assert "exactly 2 numbers" in result.output
+        assert ok.exit_code == 0, ok.output
+        assert Packing.load(out).n > 0
 
 
 class TestReportCommand:

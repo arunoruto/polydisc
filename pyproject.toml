@@ -1,7 +1,7 @@
 [project]
 name = "polydisc"
-version = "0.2.0"
-description = "Polydisperse Poisson-disc sampling for discs, spheres and flat carpets"
+version = "0.3.0"
+description = "Polydisperse Poisson-disc sampling for discs and spheres"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"

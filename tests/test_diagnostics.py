@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 from conftest import brute_force_min_gaps
 
-from polydisc.carpet import carpet
 from polydisc.diagnostics import (
     gap_report,
     nearest_neighbour_gaps,
@@ -17,6 +16,7 @@ from polydisc.diagnostics import (
     report,
 )
 from polydisc.radii import RadiusSpec
+from polydisc.regions import Ball
 from polydisc.sampling import sample
 
 
@@ -150,13 +150,19 @@ class TestProjectedArea:
             projected_area_fraction(radii, [10.0, 10.0])
         )
 
-    def test_degenerate_footprint_is_zero(self) -> None:
-        assert projected_area_fraction(np.array([1.0]), [0.0, 10.0]) == 0.0
+    def test_degenerate_container_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must all be > 0"):
+            projected_area_fraction(np.array([1.0]), [0.0, 10.0])
+
+    def test_accepts_a_region_object(self) -> None:
+        assert projected_area_fraction(np.array([2.0]), Ball(10.0)) == pytest.approx(
+            4.0 / 100.0
+        )
 
 
 class TestReport:
-    def test_full_report_of_a_carpet(self) -> None:
-        pack = carpet((80.0, 80.0), thickness=9.0, radii=2.0, seed=5, spacing=1.0)
+    def test_full_report_of_a_thin_slab(self) -> None:
+        pack = sample([80.0, 80.0, 9.0], 2.0, seed=5, spacing=1.0)
         rep = report(pack)
 
         assert rep.n == pack.n

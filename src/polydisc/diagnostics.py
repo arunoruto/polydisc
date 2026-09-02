@@ -19,6 +19,7 @@ Spacing
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,7 @@ import numpy as np
 
 from polydisc._kernels import _build_grid, _nearest_gaps
 from polydisc.radii import RadiusSpec
+from polydisc.regions import Region, as_region
 from polydisc.sampling import Packing, geometric_bias
 
 #: Gaps more negative than this (relative to the mean radius) count as
@@ -220,42 +222,65 @@ def radius_report(radii: np.ndarray, spec: RadiusSpec | None = None) -> dict[str
     out["requested_std"] = req_std
     out["mean_bias"] = (out["mean"] - req_mean) / req_mean if req_mean > 0 else math.nan
 
-    ordered = np.sort(rad)
-    target = spec.cdf_at(ordered)
-    upper = np.arange(1, rad.size + 1, dtype=np.float64) / rad.size
-    lower = np.arange(0, rad.size, dtype=np.float64) / rad.size
-    out["ks"] = float(
-        max(np.max(np.abs(upper - target)), np.max(np.abs(target - lower)))
-    )
+    out["ks"] = _ks_statistic(rad, spec)
     return out
 
 
-def projected_area_fraction(radii: np.ndarray, extent: np.ndarray) -> float:
-    """Summed disc area of a carpet divided by its footprint.
+def _ks_statistic(radii: np.ndarray, spec: RadiusSpec) -> float:
+    """Largest gap between the empirical and requested CDFs.
+
+    Compares both sides of every distinct value.  A discrete spec puts
+    atoms in the target CDF, and comparing only the right-continuous
+    value there reports a large distance for a perfect match -- a
+    monodisperse packing would score 1.0.  Taking the left limit as
+    well (via the next representable float below each value) makes the
+    statistic zero for an exact match in both the discrete and the
+    continuous case.
+    """
+    values, counts = np.unique(radii, return_counts=True)
+    cumulative = np.cumsum(counts)
+
+    empirical_at = cumulative / radii.size
+    empirical_before = (cumulative - counts) / radii.size
+    target_at = spec.cdf_at(values)
+    target_before = spec.cdf_at(np.nextafter(values, -np.inf))
+
+    return float(
+        max(
+            np.max(np.abs(empirical_at - target_at)),
+            np.max(np.abs(empirical_before - target_before)),
+        )
+    )
+
+
+def projected_area_fraction(
+    radii: np.ndarray, region: Region | Sequence[float] | np.ndarray
+) -> float:
+    """Summed disc area of a packing divided by the region's footprint.
 
     Parameters
     ----------
     radii : (N,) array_like
         Particle radii.
-    extent : array_like
-        In-plane edge lengths; only the first two entries are used, so
-        a 3D ``bounds`` can be passed directly.
+    region : Box or Ball or array_like
+        The container; a sequence is read as box edge lengths, so a
+        packing's ``bounds`` can be passed directly.
 
     Returns
     -------
     float
-        ``sum(pi * r**2) / (Lx * Ly)``.
+        ``sum(pi * r**2)`` divided by the area of the region's
+        projection onto the first two axes.
 
     Notes
     -----
     This counts overlapping projections twice and can exceed one for a
-    slab thicker than a monolayer.  That is deliberate: it is the
+    container deeper than a monolayer.  That is deliberate: it is the
     quantity that enters single-scattering estimates, whereas the true
     covered fraction saturates at one and hides the difference.
     """
     rad = np.asarray(radii, dtype=np.float64).ravel()
-    ext = np.asarray(extent, dtype=np.float64).ravel()
-    footprint = float(ext[0] * ext[1])
+    footprint = as_region(region).footprint
     if footprint <= 0.0:
         return 0.0
     return float(np.sum(np.pi * rad**2) / footprint)
@@ -271,8 +296,12 @@ class Report:
         Particle count.
     dimensions : int
         2 or 3.
+    region : dict
+        The container, from ``Box.describe`` or ``Ball.describe``.
+    region_label : str
+        One-line description of the container.
     bounds : list of float
-        Domain edge lengths.
+        Edge lengths of the container's bounding box.
     fill_fraction : float
         Area/volume fraction occupied by particles.
     projected_area_fraction : float
@@ -280,9 +309,9 @@ class Report:
     radii : dict
         Output of :func:`radius_report`.
     boundary_bias : dict
-        Output of :func:`polydisc.sampling.geometric_bias` for the box
-        that was sampled: the part of the size bias attributable to the
-        walls alone.
+        Output of :func:`polydisc.sampling.geometric_bias` for the
+        container that was sampled: the part of the size bias
+        attributable to the walls alone.
     gaps : dict
         Output of :func:`gap_report`.
     spacing : float
@@ -293,6 +322,8 @@ class Report:
 
     n: int
     dimensions: int
+    region: dict[str, Any]
+    region_label: str
     bounds: list[float]
     fill_fraction: float
     projected_area_fraction: float
@@ -313,6 +344,8 @@ class Report:
         return {
             "n": self.n,
             "dimensions": self.dimensions,
+            "region": self.region,
+            "region_label": self.region_label,
             "bounds": self.bounds,
             "fill_fraction": self.fill_fraction,
             "projected_area_fraction": self.projected_area_fraction,
@@ -327,7 +360,7 @@ class Report:
         lines = [
             f"particles         {self.n}",
             f"dimensions        {self.dimensions}D",
-            "bounds            " + " x ".join(f"{b:g}" for b in self.bounds),
+            f"region            {self.region_label}",
             f"fill fraction     {self.fill_fraction:.4f}",
         ]
         if self.dimensions == 3:
@@ -354,7 +387,8 @@ class Report:
             wall = self.boundary_bias.get("bias")
             if wall is not None and abs(wall) > 0.01:
                 lines.append(
-                    f"  of which walls  {wall * 100:+.2f}% (box geometry, not crowding)"
+                    f"  of which walls  {wall * 100:+.2f}% "
+                    "(container geometry, not crowding)"
                 )
 
         g = self.gaps
@@ -401,16 +435,18 @@ def report(packing: Packing) -> Report:
     """
     projected = 0.0
     if packing.dimensions == 3:
-        projected = projected_area_fraction(packing.radii, packing.bounds)
+        projected = projected_area_fraction(packing.radii, packing.region)
 
     return Report(
         n=packing.n,
         dimensions=packing.dimensions,
+        region=packing.region.describe(),
+        region_label=packing.region.label,
         bounds=[float(b) for b in packing.bounds],
         fill_fraction=packing.fill_fraction,
         projected_area_fraction=projected,
         radii=radius_report(packing.radii, packing.spec),
-        boundary_bias=geometric_bias(packing.spec, packing.generation_bounds),
+        boundary_bias=geometric_bias(packing.spec, packing.generation_region),
         gaps=gap_report(packing.points, packing.radii),
         spacing=float(packing.spacing),
         saturated=bool(packing.saturated),

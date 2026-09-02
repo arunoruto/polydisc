@@ -17,16 +17,19 @@ from collections.abc import Callable, Sequence
 import numpy as np
 
 import polydisc
+from polydisc.regions import Ball, Box, Region
 
-CASES: Sequence[tuple[str, list[float], np.ndarray]] = (
-    ("2D 1000^2      r=5", [1000.0, 1000.0], np.array([5.0])),
-    ("2D 1000^2      r=2..6 (x3)", [1000.0, 1000.0], np.linspace(2, 6, 5)),
-    ("2D 4000^2      r=1..5 (x5)", [4000.0, 4000.0], np.linspace(1, 5, 9)),
-    ("2D 500^2       r=0.25..5 (x20)", [500.0, 500.0], np.linspace(0.25, 5, 20)),
-    ("3D 100^3       r=5", [100.0, 100.0, 100.0], np.array([5.0])),
-    ("3D 150^3       r=1..5 (x5)", [150.0, 150.0, 150.0], np.linspace(1, 5, 9)),
-    ("3D 60^3        r=0.5..5 (x10)", [60.0, 60.0, 60.0], np.linspace(0.5, 5, 10)),
-    ("3D carpet 400^2 x 4.2", [400.0, 400.0, 4.2], np.linspace(1.0, 2.0, 5)),
+CASES: Sequence[tuple[str, Region, np.ndarray]] = (
+    ("2D box 1000^2   r=5", Box([1000.0, 1000.0]), np.array([5.0])),
+    ("2D box 1000^2   r=2..6 (x3)", Box([1000.0, 1000.0]), np.linspace(2, 6, 5)),
+    ("2D box 4000^2   r=1..5 (x5)", Box([4000.0, 4000.0]), np.linspace(1, 5, 9)),
+    ("2D box 500^2    r=0.25..5 (x20)", Box([500.0, 500.0]), np.linspace(0.25, 5, 20)),
+    ("3D box 100^3    r=5", Box([100.0] * 3), np.array([5.0])),
+    ("3D box 150^3    r=1..5 (x5)", Box([150.0] * 3), np.linspace(1, 5, 9)),
+    ("3D box 60^3     r=0.5..5 (x10)", Box([60.0] * 3), np.linspace(0.5, 5, 10)),
+    ("3D carpet 400^2 x 4.2", Box([400.0, 400.0, 4.2]), np.linspace(1.0, 2.0, 5)),
+    ("2D ball R=500   r=1..5 (x5)", Ball(500.0, dimensions=2), np.linspace(1, 5, 9)),
+    ("3D ball R=75    r=1..5 (x5)", Ball(75.0), np.linspace(1, 5, 9)),
 )
 
 
@@ -69,24 +72,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         old_sample(np.array([40.0, 40.0, 40.0]), np.array([2.0]), 5)
 
     if old_sample is None:
-        print(f"{'case':<32}{'N':>9}{'seconds':>10}")
-        print("-" * 51)
+        print(f"{'case':<34}{'N':>9}{'seconds':>10}")
+        print("-" * 53)
     else:
-        header = f"{'case':<32}{'N':>9}{'old s':>9}{'new s':>9}{'speedup':>9}"
+        header = f"{'case':<34}{'N':>9}{'old s':>9}{'new s':>9}{'speedup':>9}"
         print(header)
         print("-" * len(header))
 
-    for name, bounds, radii in CASES:
-        box = np.asarray(bounds, dtype=np.float64)
+    for name, region, radii in CASES:
         new_time, count = _time(
-            lambda box=box, radii=radii: (
-                polydisc.sample(box, radii, repetitions=args.repetitions, seed=0).n
+            lambda region=region, radii=radii: (
+                polydisc.sample(region, radii, repetitions=args.repetitions, seed=0).n
             )
         )
         if old_sample is None:
-            print(f"{name:<32}{count:>9}{new_time:>10.3f}")
+            print(f"{name:<34}{count:>9}{new_time:>10.3f}")
             continue
 
+        if not isinstance(region, Box):
+            # The old implementation only knew about boxes.
+            print(f"{name:<34}{count:>9}{'-':>9}{new_time:>9.3f}{'-':>9}")
+            continue
+
+        box = region.bounds
         np.random.seed(0)
         old_time, _ = _time(
             lambda box=box, radii=radii: len(
@@ -94,7 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         print(
-            f"{name:<32}{count:>9}{old_time:>9.3f}{new_time:>9.3f}"
+            f"{name:<34}{count:>9}{old_time:>9.3f}{new_time:>9.3f}"
             f"{old_time / new_time:>8.1f}x"
         )
 

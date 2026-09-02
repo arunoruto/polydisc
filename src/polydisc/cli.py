@@ -21,10 +21,9 @@ import numpy as np
 import yaml
 
 from polydisc import __version__
-from polydisc.carpet import carpet as carpet_fn
-from polydisc.carpet import monolayer_thickness
 from polydisc.diagnostics import report as report_fn
 from polydisc.radii import RadiusSpec
+from polydisc.regions import Ball, Box, Region
 from polydisc.sampling import Packing, sample
 
 logger = logging.getLogger(__name__)
@@ -367,6 +366,58 @@ def _build_spec(
         raise click.BadParameter(str(exc)) from exc
 
 
+def _build_region(
+    cfg: dict[str, Any] | None,
+    *,
+    shape: str | None,
+    bounds: str | None,
+    ball_radius: float | None,
+    dims: int | None,
+) -> Region:
+    """Turn CLI/config container options into a region.
+
+    Returns
+    -------
+    Box or Ball
+        The resolved container.
+
+    Raises
+    ------
+    click.BadParameter
+        If the shape is unknown or its required parameters are missing
+        or malformed.
+    """
+    shape = (_pick(cfg, "shape", shape) or "box").lower()
+
+    if shape in ("ball", "sphere"):
+        radius = _pick(cfg, "ball_radius", ball_radius, coerce="float")
+        if radius is None:
+            raise click.BadParameter(f"--shape {shape} needs --ball-radius")
+        dimensions = _pick(cfg, "dims", dims, coerce="int")
+        try:
+            return Ball(float(radius), 3 if dimensions is None else int(dimensions))
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+
+    if shape != "box":
+        raise click.BadParameter(f"unknown --shape {shape!r}; expected box or ball")
+
+    value = _pick(cfg, "bounds", bounds, coerce="list_float")
+    if value is None:
+        raise click.BadParameter("--bounds is required (or set bounds in config)")
+    edges = (
+        np.asarray(value, dtype=np.float64)
+        if isinstance(value, np.ndarray)
+        else _parse_csv_floats(str(value))
+    )
+    if edges is None:
+        raise click.BadParameter("--bounds must list 2 or 3 numbers")
+    try:
+        return Box(edges)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
 # ---------------------------------------------------------------------
 # output
 # ---------------------------------------------------------------------
@@ -410,7 +461,7 @@ def _emit(pack: Packing, out: str | None, show_report: bool) -> None:
 
 
 def _sampling_options[F: Callable[..., Any]](func: F) -> F:
-    """Attach the options shared by ``generate`` and ``carpet``."""
+    """Attach the sampling options for the generate command."""
     options = [
         click.option(
             "--config",
@@ -543,94 +594,58 @@ def _resolve_common(
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="polydisc")
 def cli() -> None:
-    """Polydisperse Poisson-disc sampling for discs, spheres and carpets."""
+    """Polydisperse Poisson-disc sampling for discs and spheres."""
 
 
 @cli.command("generate")
 @click.option(
+    "--shape",
+    type=click.Choice(["box", "ball", "sphere"], case_sensitive=False),
+    default=None,
+    help="Container to fill  [default: box]",
+)
+@click.option(
     "--bounds",
     default=None,
-    help="Comma-separated box edges, e.g. 800,600 or 200,200,200",
+    help="Box edges, e.g. 800,600 or 200,200,50. A flat carpet is a box "
+    "whose last edge is about one particle diameter",
 )
-@_sampling_options
-def generate(bounds: str | None, config: str | None, **kwargs: Any) -> None:
-    """Sample a packing in a 2D or 3D box.
-
-    \b
-    Examples:
-      polydisc generate --bounds 500,500 --radii 2,4,6 --seed 0
-      polydisc generate --bounds 200,200,50 --dist lognormal \\
-          --gmean 2 --gstd 1.3 --spacing 2 --out pack.npz
-    """
-    _configure_logging(kwargs.pop("verbose", False))
-    cfg = _config_from(config, kwargs.pop("config_format"), kwargs.pop("profile"))
-
-    bounds_val = _pick(cfg, "bounds", bounds, coerce="list_float")
-    if bounds_val is None:
-        raise click.BadParameter("--bounds is required (or set bounds in config)")
-    bounds_arr = (
-        np.asarray(bounds_val, dtype=np.float64)
-        if isinstance(bounds_val, np.ndarray)
-        else _parse_csv_floats(str(bounds_val))
-    )
-    if bounds_arr is None or bounds_arr.shape[0] not in (2, 3):
-        raise click.BadParameter("--bounds must list 2 or 3 numbers")
-
-    spec = _build_spec(cfg, **_spec_kwargs(kwargs))
-    common = _resolve_common(
-        cfg,
-        kwargs.pop("spacing"),
-        kwargs.pop("fit_bounds"),
-        kwargs.pop("repetitions"),
-        kwargs.pop("max_points"),
-        kwargs.pop("seed"),
-    )
-
-    try:
-        pack = sample(bounds_arr, spec, **common)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    _emit(pack, kwargs.pop("out"), kwargs.pop("report"))
-
-
-@cli.command("carpet")
-@click.option("--extent", default=None, help="In-plane edges as Lx,Ly, e.g. 500,500")
 @click.option(
-    "--thickness",
+    "--ball-radius",
     type=float,
     default=None,
-    help="Slab depth; omit for the thinnest monolayer the radii allow",
+    help="Radius of the container, for --shape ball",
+)
+@click.option(
+    "--dims",
+    type=click.IntRange(2, 3),
+    default=None,
+    help="Dimension of a ball container  [default: 3]",
 )
 @_sampling_options
-def carpet_cmd(
-    extent: str | None,
-    thickness: float | None,
+def generate(
+    shape: str | None,
+    bounds: str | None,
+    ball_radius: float | None,
+    dims: int | None,
     config: str | None,
     **kwargs: Any,
 ) -> None:
-    """Sample a flat carpet of spheres in a thin slab.
+    """Fill a box or a ball with a packing.
 
     \b
     Examples:
-      polydisc carpet --extent 500,500 --radii 1,2 --seed 0
-      polydisc carpet --extent 500,500 --dist lognormal --gmean 1 \\
-          --gstd 1.3 --spacing 2 --out carpet.npz
+      polydisc generate --bounds 500,500 --radii 2,4 --seed 0
+      polydisc generate --shape ball --ball-radius 100 --radii 2,4
+      polydisc generate --bounds 500,500,4.1 --dist lognormal \\
+          --gmean 1 --gstd 1.3 --spacing 2 --out carpet.npz
     """
     _configure_logging(kwargs.pop("verbose", False))
     cfg = _config_from(config, kwargs.pop("config_format"), kwargs.pop("profile"))
 
-    extent_val = _pick(cfg, "extent", extent, coerce="list_float")
-    if extent_val is None:
-        raise click.BadParameter("--extent is required (or set extent in config)")
-    extent_arr = (
-        np.asarray(extent_val, dtype=np.float64)
-        if isinstance(extent_val, np.ndarray)
-        else _parse_csv_floats(str(extent_val))
+    region = _build_region(
+        cfg, shape=shape, bounds=bounds, ball_radius=ball_radius, dims=dims
     )
-    if extent_arr is None or extent_arr.shape[0] != 2:
-        raise click.BadParameter("--extent must list exactly 2 numbers")
-
     spec = _build_spec(cfg, **_spec_kwargs(kwargs))
     common = _resolve_common(
         cfg,
@@ -641,15 +656,8 @@ def carpet_cmd(
         kwargs.pop("seed"),
     )
 
-    thickness = _pick(cfg, "thickness", thickness, coerce="float")
-    if thickness is None:
-        thickness = monolayer_thickness(
-            spec, spacing=common["spacing"], fit_bounds=common["fit_bounds"]
-        )
-        logger.info("Using monolayer thickness %.6g", thickness)
-
     try:
-        pack = carpet_fn(extent_arr, float(thickness), spec, **common)
+        pack = sample(region, spec, **common)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 

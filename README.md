@@ -1,14 +1,14 @@
 # polydisc
 
-Polydisperse Poisson-disc sampling for discs, spheres and flat carpets.
+Polydisperse Poisson-disc sampling for discs and spheres.
 
 A Numba-accelerated, variable-radius variant of Bridson's algorithm
 (*Fast Poisson disk sampling in arbitrary dimensions*, SIGGRAPH 2007,
-algorithm 4.3) for 2D and 3D boxes: every particle gets its own
-radius drawn from a distribution you choose, no two particles overlap,
-and none pokes outside the box. Built for generating sphere carpets and
-packings for light-scattering work, so it also tells you what it
-*actually* produced, not just what you asked for.
+algorithm 4.3) in 2D and 3D: every particle gets its own radius drawn
+from a distribution you choose, no two particles overlap, and none pokes
+outside the container -- a box or a ball. Built for generating packings
+for light-scattering work, so it also tells you what it *actually*
+produced, not just what you asked for.
 
 Formerly `pysson-disc`.
 
@@ -49,38 +49,77 @@ True
 
 ```
 
-## Flat carpets
+## Regions
 
-A carpet is a packing in a slab thin enough that the spheres form a
-layer. `carpet` wraps the 3D sampler; `monolayer_thickness` gives the
-thinnest slab the radii allow.
+Particles fill a **region**. Pass a sequence of edge lengths and you get
+a `Box`; pass a `Ball` to fill a sphere instead.
 
 ```python
->>> spec = polydisc.RadiusSpec.lognormal(gmean=1.0, gstd=1.3)
->>> pack = polydisc.carpet(
-...     (300.0, 300.0),
-...     thickness=polydisc.monolayer_thickness(spec),
-...     radii=spec,
-...     seed=0,
-... )
->>> pack.dimensions
-3
->>> bool(pack.points[:, 2].max() <= pack.bounds[2])
+>>> box = polydisc.sample(polydisc.Box([300.0, 200.0]), 4.0, seed=0)
+>>> ball = polydisc.sample(polydisc.Ball(150.0, dimensions=2), 4.0, seed=0)
+>>> box.region.label, ball.region.label
+('box, 300 x 200', 'ball, radius 150')
+>>> bool(ball.region.contains(ball.points, ball.radii).all())
 True
 
 ```
 
+| Region                       | Container                                  |
+| ---------------------------- | ------------------------------------------ |
+| `Box([lx, ly])`              | 2D rectangle                               |
+| `Box([lx, ly, lz])`          | 3D box — a **carpet** is one of these, thin |
+| `Ball(r, dimensions=2)`      | filled disc                                |
+| `Ball(r)`                    | filled sphere                              |
+
+It is called `Ball` rather than `Sphere` because the particles inside it
+are spheres too; this is the container they go in.
+
 ```sh
-polydisc carpet --extent 300,300 --dist lognormal --gmean 1 --gstd 1.3 \
-    --seed 0 --out carpet.npz
+polydisc generate --bounds 500,500 --radii 2,4 --seed 0
+polydisc generate --shape ball --ball-radius 200 --radii 2,4 --seed 0
 ```
 
-Omitting `--thickness` uses the thinnest monolayer automatically.
+Every region reports its `volume`, `footprint`, `bounding_box` and
+`max_particle_radius`, and can `scaled()` itself — that is all the
+sampler needs, so a new shape is a small addition.
+
+### Flat carpets
+
+A carpet is not a separate shape: it is a `Box` whose depth is about one
+particle diameter. `2.05 * rmax` is the thinnest slab that still admits
+the largest particle.
+
+```python
+>>> spec = polydisc.RadiusSpec.lognormal(gmean=1.0, gstd=1.3)
+>>> carpet = polydisc.sample(
+...     [300.0, 300.0, 2.05 * spec.rmax], spec, seed=0
+... )
+>>> carpet.dimensions
+3
+>>> bool(carpet.points[:, 2].max() <= carpet.bounds[2])
+True
+
+```
 
 Spheres pack in genuine 3D, so they may overlap seen from above;
-`projected_area_fraction` is the summed disc area over the footprint,
-which is the quantity single-scattering estimates want (and which can
-exceed 1 for a thicker deposit).
+`projected_area_fraction` is the summed disc area over the container's
+footprint, which is the quantity single-scattering estimates want (and
+which can exceed 1 for a deeper deposit).
+
+One wrinkle: with `fit_bounds` on, spacing pre-shrinks *every* axis, so
+the depth has to be inflated by the same factor or the slab stops being
+a monolayer.
+
+```python
+>>> spacing = 2.0
+>>> depth = 2.05 * spec.rmax * polydisc.spacing_scale(spacing)
+>>> spaced = polydisc.sample(
+...     [300.0, 300.0, depth], spec, spacing=spacing, seed=0
+... )
+>>> spaced.n < carpet.n
+True
+
+```
 
 ## Spacing
 
@@ -116,8 +155,8 @@ by the same factor: the structure is stretched, not reshaped.
 
 ### Where does the extra room come from?
 
-`fit_bounds` decides whether the domain or the particle count absorbs
-the spacing.
+`fit_bounds` decides whether the container or the particle count
+absorbs the spacing.
 
 ```python
 >>> fitted = polydisc.sample([200.0, 200.0], 4.0, spacing=2.0, seed=1)
@@ -131,24 +170,11 @@ True
 
 ```
 
-* `fit_bounds=True` (default) samples a pre-shrunk box, then dilates, so
-  the finished packing spans exactly the extent you asked for and holds
-  fewer particles.
+* `fit_bounds=True` (default) samples a pre-shrunk container, then
+  dilates, so the finished packing occupies exactly the container you
+  asked for and holds fewer particles.
 * `fit_bounds=False` samples the full box and lets the domain grow —
   PyFracVAL's behaviour, and the one that keeps the particle count.
-
-For carpets, pass the same settings to `monolayer_thickness` so the
-pre-shrink does not eat the slab:
-
-```python
->>> thickness = polydisc.monolayer_thickness(spec, spacing=2.0)
->>> pack = polydisc.carpet(
-...     (300.0, 300.0), thickness, radii=spec, spacing=2.0, seed=0
-... )
->>> bool(pack.bounds[2] > 2 * spec.rmax)
-True
-
-```
 
 ## Radius distributions
 
@@ -204,7 +230,9 @@ Negligible in a roomy box, dominant in a thin slab — it is why a
 
 ```
 
-`sample` logs a warning when this exceeds 5%.
+`sample` logs a warning when this exceeds 5%. A ball and its bounding
+cube score identically here: both admit a fraction `(1 - r/R)**d` of
+their own measure.
 
 **Crowding.** Candidate radii are drawn once per placement *attempt*, so
 a small candidate survives a tight neighbourhood more often than a large
@@ -228,7 +256,7 @@ nearest-neighbour gaps, fill fractions:
 >>> print(polydisc.report(pack))         # doctest: +ELLIPSIS
 particles         ...
 dimensions        2D
-bounds            200 x 200
+region            box, 200 x 200
 fill fraction     ...
 radius            mean ...
 radius (geom)     ...
@@ -246,24 +274,22 @@ cell could hold anything closer.
 ## Command line
 
 ```
-polydisc generate   sample a 2D or 3D box
-polydisc carpet     sample a flat carpet in a thin slab
+polydisc generate   fill a box or a ball
 polydisc report     print diagnostics for a saved .npz
 polydisc radii      print a discrete radius set for pasting into a config
 ```
 
-Both samplers accept the same options, from flags or a config file:
-
 ```sh
 polydisc generate --bounds 500,500,50 --dist lognormal --gmean 2 --gstd 1.3 \
     --spacing 2 --repetitions 30 --seed 0 --out pack.npz
+polydisc generate --shape ball --ball-radius 200 --radii 1,2 --seed 0
 ```
 
 CSV goes to stdout when `--out` is omitted, with diagnostics on stderr
 so a pipe stays clean:
 
 ```sh
-polydisc carpet --extent 500,500 --radii 1,2 --seed 0 | head -5
+polydisc generate --bounds 500,500,4.1 --radii 1,2 --seed 0 | head -5
 ```
 
 Config files may be TOML, YAML or JSON, with optional named profiles;
@@ -278,16 +304,20 @@ gmean = 1.0
 gstd = 1.3
 
 [profiles.dense]
-extent = [500.0, 500.0]
+bounds = [500.0, 500.0, 4.1]
 spacing = 0.0
 
 [profiles.sparse]
-extent = [500.0, 500.0]
+bounds = [500.0, 500.0, 8.2]
 spacing = 3.0
+
+[profiles.ball]
+shape = "ball"
+ball_radius = 200.0
 ```
 
 ```sh
-polydisc carpet --config packing.toml --profile sparse --out sparse.npz
+polydisc generate --config packing.toml --profile sparse --out sparse.npz
 ```
 
 ## Interactive inspector
@@ -296,8 +326,8 @@ polydisc carpet --config packing.toml --profile sparse --out sparse.npz
 streamlit run src/polydisc/app_streamlit.py
 ```
 
-Sidebar controls for every sampling option, a 2D/3D view, the realised
-radius histogram against the requested density, and the full report.
+Container and distribution controls, a 2D/3D view, the realised radius
+histogram against the requested density, and the full report.
 
 ## Performance
 
@@ -324,7 +354,8 @@ Two changes account for most of it:
   point per cell — makes the scan grow as `(rmax/rmin)^d` and the grid
   memory as `(1/rmin)^d`. Cells now hold several points in an intrusive
   linked list, so memory scales with the number of *particles*, not
-  with the number of grid cells.
+  with the number of grid cells. A ball is sampled on the grid of its
+  bounding box, which just leaves the corner cells empty.
 * **No allocation in the hot loop.** Candidate positions, directions and
   cell indices are all scalar arithmetic. A direct NumPy-style
   translation allocates several small arrays per candidate, which is
@@ -340,17 +371,17 @@ Two changes account for most of it:
   it; pass `seed=` instead. Omitting it draws one from NumPy's global
   generator and records it on the result.
 * The default `max_points` is the hard geometric ceiling
-  `domain / smallest particle`, which cannot truncate a real run.
+  `container / smallest particle`, which cannot truncate a real run.
 
 ## Layout
 
 ```
 src/polydisc/
     _kernels.py       Numba kernels: samplers, radius draws, gap search
+    regions.py        Box and Ball: the containers to fill
     radii.py          RadiusSpec: discrete and continuous distributions
     sampling.py       sample(), Packing, geometric_bias()
     spacing.py        spacing -> scale factor
-    carpet.py         thin-slab wrapper
     diagnostics.py    realised radii, gaps, report
     cli.py            polydisc command
     app_streamlit.py  interactive inspector

@@ -1,8 +1,14 @@
 """Compare carpet spacings and render them to ``out/example_carpet.png``.
 
-Shows the same carpet at three spacings, in top view and side view, so
-the position-only dilation is visible: the particles keep their sizes
-while the layer opens up.
+A carpet needs no special support: it is a :class:`polydisc.Box` whose
+depth is about one particle diameter.  The one wrinkle is that spacing
+pre-shrinks every axis, so the depth must be inflated by the same factor
+for the slab to stay a monolayer -- that is the ``spacing_scale`` term
+below.
+
+The three panels show the same carpet at three spacings, in top view and
+side view, so the position-only dilation is visible: the particles keep
+their sizes while the layer opens up.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ import polydisc
 
 OUT = Path("out")
 SPACINGS = (0.0, 1.0, 2.0)
-
+EXTENT = (120.0, 120.0)
 
 #: Width of the x-slice shown in the side views.  A side view of the
 #: whole 120-wide carpet at true aspect would be a few pixels tall, and
@@ -42,12 +48,13 @@ def _draw(ax, xs, ys, radii, xlim, ylim, vmin, vmax) -> None:
 def main() -> None:
     """Sample one carpet per spacing and plot top and side views."""
     spec = polydisc.RadiusSpec.lognormal(gmean=1.0, gstd=1.3)
-    extent = (120.0, 120.0)
 
     packs = []
     for spacing in SPACINGS:
-        thickness = polydisc.monolayer_thickness(spec, spacing=spacing)
-        pack = polydisc.carpet(extent, thickness, radii=spec, spacing=spacing, seed=0)
+        # 2.05 * rmax is the thinnest slab that still admits the largest
+        # particle; the spacing factor undoes the pre-shrink.
+        depth = 2.05 * spec.rmax * polydisc.spacing_scale(spacing)
+        pack = polydisc.sample([*EXTENT, depth], spec, spacing=spacing, seed=0)
         report = polydisc.report(pack)
         print(f"--- spacing {spacing} ---")
         print(report)

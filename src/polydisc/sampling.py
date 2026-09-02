@@ -1,4 +1,4 @@
-"""Public sampling API: build a packing, get a :class:`Packing` back."""
+"""Public sampling API: fill a region, get a :class:`Packing` back."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import numpy as np
 
 from polydisc import _kernels
 from polydisc.radii import RadiusSpec, as_radius_spec
+from polydisc.regions import Box, Region, as_region, region_from_metadata
 from polydisc.spacing import spacing_scale
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 _MAX_POINTS_CEILING = 200_000_000
 
 #: Relative shift of the mean radius above which `sample` warns that the
-#: box geometry, not the request, is choosing the sizes.
+#: container geometry, not the request, is choosing the sizes.
 _BIAS_WARN_THRESHOLD = 0.05
 
 
@@ -38,8 +39,8 @@ class Packing:
         `scale`.
     radii : (N,) numpy.ndarray
         Particle radii.  Never affected by `spacing`.
-    bounds : (D,) numpy.ndarray
-        Extent of the domain the packing occupies, after spacing.
+    region : Box or Ball
+        The container the particles fill, after spacing.
     spec : RadiusSpec
         The radius distribution that was requested.
     spacing : float
@@ -48,8 +49,8 @@ class Packing:
     scale : float
         The position dilation actually applied, ``1 + spacing / 2``.
     fit_bounds : bool
-        Whether generation was pre-shrunk so the final extent equals
-        the requested `bounds`.
+        Whether generation was pre-shrunk so the finished packing
+        occupies exactly the requested region.
     seed : int
         Seed handed to the kernel; replaying it reproduces `points`
         exactly.
@@ -65,8 +66,10 @@ class Packing:
         Number of particles.
     dimensions : int
         2 or 3.
+    bounds : numpy.ndarray
+        Edge lengths of the region's axis-aligned bounding box.
     fill_fraction : float
-        Total particle area/volume divided by the domain's.
+        Total particle area/volume divided by the region's.
 
     Examples
     --------
@@ -80,7 +83,7 @@ class Packing:
 
     points: np.ndarray
     radii: np.ndarray
-    bounds: np.ndarray
+    region: Region
     spec: RadiusSpec = field(repr=False)
     spacing: float = 0.0
     scale: float = 1.0
@@ -100,37 +103,47 @@ class Packing:
         return int(self.points.shape[1])
 
     @property
+    def bounds(self) -> np.ndarray:
+        """Edge lengths of the region's axis-aligned bounding box."""
+        return self.region.bounding_box
+
+    @property
+    def generation_region(self) -> Region:
+        """Container the kernel actually sampled in, before dilation.
+
+        Returns
+        -------
+        Box or Ball
+            The region scaled down by `scale`.  Both `fit_bounds` modes
+            end up here: fitting shrinks the request before sampling,
+            expanding grows the container after it, and either way the
+            region the kernel saw is the reported one undone by `scale`.
+        """
+        return self.region.scaled(1.0 / self.scale)
+
+    @property
+    def generation_bounds(self) -> np.ndarray:
+        """Bounding box of :attr:`generation_region`."""
+        return self.generation_region.bounding_box
+
+    @property
     def fill_fraction(self) -> float:
-        """Fraction of the domain occupied by particles.
+        """Fraction of the region occupied by particles.
 
         Returns
         -------
         float
             Area fraction in 2D, volume fraction in 3D.  Particles are
-            entirely inside the domain, so this never exceeds one.
+            entirely inside the region, so this never exceeds one.
         """
-        domain = float(np.prod(self.bounds))
-        if domain <= 0.0:
+        capacity = self.region.volume
+        if capacity <= 0.0:
             return 0.0
         if self.dimensions == 2:
             occupied = float(np.sum(np.pi * self.radii**2))
         else:
             occupied = float(np.sum((4.0 / 3.0) * np.pi * self.radii**3))
-        return occupied / domain
-
-    @property
-    def generation_bounds(self) -> np.ndarray:
-        """Box the kernel actually sampled in, before any dilation.
-
-        Returns
-        -------
-        numpy.ndarray
-            ``bounds / scale``.  Both `fit_bounds` modes end up here:
-            fitting shrinks the request before sampling, expanding
-            grows the domain after it, and either way the box the
-            kernel saw is the reported one undone by `scale`.
-        """
-        return self.bounds / self.scale
+        return occupied / capacity
 
     def metadata(self) -> dict[str, Any]:
         """Return the run's settings and summary as a plain mapping.
@@ -144,6 +157,7 @@ class Packing:
         return {
             "n": self.n,
             "dimensions": self.dimensions,
+            "region": self.region.describe(),
             "bounds": [float(b) for b in self.bounds],
             "spacing": float(self.spacing),
             "scale": float(self.scale),
@@ -195,9 +209,10 @@ class Packing:
         Returns
         -------
         Packing
-            The restored packing.  `spec` is rebuilt from the stored
-            metadata where possible and falls back to a discrete spec
-            over the realised radii otherwise.
+            The restored packing.  `region` and `spec` are rebuilt from
+            the stored metadata where possible, falling back to a box
+            over the stored bounds and a discrete spec over the realised
+            radii otherwise.
         """
         with np.load(Path(path), allow_pickle=False) as data:
             points = np.asarray(data["points"], dtype=np.float64)
@@ -207,12 +222,12 @@ class Packing:
             if "metadata" in data:
                 meta = json.loads(str(data["metadata"]))
 
-        spec = _spec_from_metadata(meta.get("radii"), radii)
+        region = region_from_metadata(meta.get("region")) or Box(bounds)
         return cls(
             points=points,
             radii=radii,
-            bounds=bounds,
-            spec=spec,
+            region=region,
+            spec=_spec_from_metadata(meta.get("radii"), radii),
             spacing=float(meta.get("spacing", 0.0)),
             scale=float(meta.get("scale", 1.0)),
             fit_bounds=bool(meta.get("fit_bounds", True)),
@@ -247,72 +262,59 @@ def _spec_from_metadata(meta: dict[str, Any] | None, radii: np.ndarray) -> Radiu
                 return RadiusSpec.uniform(meta["rmin"], meta["rmax"])
         except (KeyError, ValueError):
             logger.warning(
-                "Could not rebuild RadiusSpec from metadata; "
-                "falling back to the realised radii."
+                "Could not rebuild RadiusSpec from metadata; falling back "
+                "to the realised radii."
             )
     unique = np.unique(radii) if radii.size else np.array([1.0])
     return RadiusSpec.discrete(unique)
 
 
-def _validate_bounds(bounds: Sequence[float] | np.ndarray) -> np.ndarray:
-    """Coerce and check a domain specification."""
-    arr = np.asarray(bounds, dtype=np.float64).ravel()
-    if arr.shape[0] not in (2, 3):
-        raise ValueError(
-            f"bounds must have 2 or 3 entries (2D or 3D), got {arr.shape[0]}"
-        )
-    if not np.all(np.isfinite(arr)):
-        raise ValueError("bounds must all be finite")
-    if np.any(arr <= 0.0):
-        raise ValueError(f"bounds must all be > 0, got {arr.tolist()}")
-    return arr
-
-
-def _auto_max_points(gen_bounds: np.ndarray, rmin: float) -> int:
+def _auto_max_points(region: Region, rmin: float) -> int:
     """Hard geometric ceiling on how many particles can possibly fit.
 
-    Particles lie entirely inside the domain and do not overlap, so
-    their areas/volumes sum to at most the domain's.  That makes
-    ``domain / smallest_particle`` a true upper bound, which is what we
+    Particles lie entirely inside the region and do not overlap, so
+    their areas/volumes sum to at most the region's.  That makes
+    ``region / smallest_particle`` a true upper bound, which is what we
     use as the default ``max_points``: it never truncates a legitimate
     run, but it does stop a pathological request from growing without
     limit.
     """
-    domain = float(np.prod(gen_bounds))
-    if gen_bounds.shape[0] == 2:
+    if region.dimensions == 2:
         unit = math.pi * rmin**2
     else:
         unit = (4.0 / 3.0) * math.pi * rmin**3
-    return int(min(domain / unit + 8.0, _MAX_POINTS_CEILING))
+    return int(min(region.volume / unit + 8.0, _MAX_POINTS_CEILING))
 
 
 def geometric_bias(
-    spec: RadiusSpec, bounds: Sequence[float] | np.ndarray
+    spec: RadiusSpec, region: Region | Sequence[float] | np.ndarray
 ) -> dict[str, float]:
-    """Predict how a box's walls skew the realised size distribution.
+    """Predict how a container's walls skew the realised size mix.
 
-    A particle of radius ``r`` can only be centred in the shrunken box
-    of edges ``b_d - 2r``, so large particles have proportionally fewer
-    admissible positions than small ones.  In the dilute limit the
-    realised density is the requested one reweighted by that admissible
-    volume, which is exactly what this computes.  The effect is mild
-    for a cube much larger than the particles and severe for a thin
-    slab, where it is the main reason a "monolayer" of a wide size
-    distribution comes out almost entirely fine.
+    A particle of radius ``r`` can only be centred in the sub-region its
+    own size leaves free -- ``bounds - 2r`` inside a box, a ball of
+    radius ``R - r`` inside a ball -- so large particles have
+    proportionally fewer admissible positions than small ones.  In the
+    dilute limit the realised density is the requested one reweighted by
+    that admissible measure, which is exactly what this computes.  The
+    effect is mild for a container much larger than the particles and
+    severe for a thin slab, where it is the main reason a monolayer of a
+    wide size distribution comes out almost entirely fine.
 
     Parameters
     ----------
     spec : RadiusSpec
         The requested radius distribution.
-    bounds : array_like
-        Edge lengths of the box that will be sampled.
+    region : Box or Ball or array_like
+        The container that will be filled; a sequence is read as box
+        edge lengths.
 
     Returns
     -------
     dict
         ``requested_mean``, ``admitted_mean``, ``bias`` (their relative
         difference) and ``excluded``, the probability mass whose radius
-        cannot fit in the box at all.
+        cannot fit in the container at all.
 
     See Also
     --------
@@ -332,10 +334,9 @@ def geometric_bias(
     >>> round(geometric_bias(spec, [100.0, 100.0, 6.2])["bias"], 3)
     -0.458
     """
-    box = np.asarray(bounds, dtype=np.float64).ravel()
+    container = as_region(region)
     values, pmf = spec.discretize()
-    room = np.clip(box[None, :] - 2.0 * values[:, None], 0.0, None)
-    admissible = np.prod(room, axis=1)
+    admissible = container.admissible_measure(values)
 
     requested_mean = float(np.sum(pmf * values))
     excluded = float(np.sum(pmf[admissible <= 0.0]))
@@ -365,7 +366,7 @@ def geometric_bias(
 
 
 def sample(
-    bounds: Sequence[float] | np.ndarray,
+    region: Region | Sequence[float] | np.ndarray,
     radii: RadiusSpec | Sequence[float] | np.ndarray | float,
     *,
     weights: Sequence[float] | np.ndarray | None = None,
@@ -375,13 +376,15 @@ def sample(
     fit_bounds: bool = True,
     max_points: int | None = None,
 ) -> Packing:
-    """Generate a polydisperse Poisson-disc packing in a 2D or 3D box.
+    """Fill a box or a ball with a polydisperse Poisson-disc packing.
 
     Parameters
     ----------
-    bounds : array_like
-        Box edge lengths, two entries for 2D or three for 3D.  The box
-        starts at the origin.
+    region : Box or Ball or array_like
+        The container to fill.  A plain sequence of edge lengths is read
+        as a :class:`~polydisc.regions.Box`, two entries for 2D or three
+        for 3D.  A flat carpet is a box whose third edge is close to a
+        particle diameter.
     radii : RadiusSpec or array_like or float
         Radius distribution.  A float or sequence is read as a discrete
         set of allowed radii; use :class:`~polydisc.radii.RadiusSpec`
@@ -402,9 +405,9 @@ def sample(
         for one average particle.  See :mod:`polydisc.spacing`.
     fit_bounds : bool, optional
         With `spacing` above zero, ``True`` (default) generates in a
-        pre-shrunk box so the finished packing spans exactly `bounds`;
-        ``False`` generates in `bounds` and lets the domain grow to
-        ``bounds * scale``, matching PyFracVAL's behaviour.
+        pre-shrunk container so the finished packing occupies exactly
+        `region`; ``False`` generates in `region` and lets the container
+        grow by `scale`, matching PyFracVAL's behaviour.
     max_points : int, optional
         Stop after this many particles.  Defaults to a geometric upper
         bound that never truncates a real run.
@@ -417,14 +420,14 @@ def sample(
     Raises
     ------
     ValueError
-        If `bounds` is malformed, `repetitions` or `max_points` is
+        If `region` is malformed, `repetitions` or `max_points` is
         below one, `spacing` is negative, or the largest possible
-        particle cannot fit in the (possibly pre-shrunk) box.
+        particle cannot fit in the (possibly pre-shrunk) container.
 
     See Also
     --------
-    polydisc.carpet.carpet : Thin-slab convenience wrapper.
     polydisc.diagnostics.report : Check what was actually realised.
+    geometric_bias : Predict the container's effect before sampling.
 
     Notes
     -----
@@ -442,45 +445,52 @@ def sample(
     2
     >>> float(pack.radii.min()) >= 2.0
     True
+
+    Filling a ball instead of a box:
+
+    >>> from polydisc.regions import Ball
+    >>> pack = sample(Ball(30.0), 3.0, seed=7)
+    >>> bool(pack.region.contains(pack.points, pack.radii).all())
+    True
     """
-    bounds_arr = _validate_bounds(bounds)
+    container = as_region(region)
     spec = as_radius_spec(radii, weights)
 
     if int(repetitions) < 1:
         raise ValueError(f"repetitions must be >= 1, got {repetitions}")
 
     scale = spacing_scale(spacing)
-    gen_bounds = bounds_arr / scale if fit_bounds else bounds_arr
-    out_bounds = bounds_arr if fit_bounds else bounds_arr * scale
+    gen_region = container.scaled(1.0 / scale) if fit_bounds else container
+    out_region = container if fit_bounds else container.scaled(scale)
 
-    smallest_edge = float(np.min(gen_bounds))
-    if 2.0 * spec.rmax >= smallest_edge:
+    limit = gen_region.max_particle_radius
+    if spec.rmax >= limit:
         hint = ""
         if fit_bounds and scale > 1.0:
             hint = (
-                f" (spacing={spacing} shrinks the generation box to "
-                f"{np.array2string(gen_bounds, precision=4)}; pass "
-                "fit_bounds=False to keep the full box)"
+                f" (spacing={spacing} shrinks the container by {scale:g}x "
+                "before sampling; pass fit_bounds=False to keep the full "
+                "size)"
             )
         raise ValueError(
-            f"largest particle (diameter {2.0 * spec.rmax:g}) does not fit "
-            f"in the shortest box edge ({smallest_edge:g}){hint}"
+            f"largest particle (radius {spec.rmax:g}) does not fit in the "
+            f"container, which admits at most {limit:g}{hint}"
         )
 
     if max_points is None:
-        max_points_int = _auto_max_points(gen_bounds, spec.rmin)
+        max_points_int = _auto_max_points(gen_region, spec.rmin)
     else:
         max_points_int = int(max_points)
         if max_points_int < 1:
             raise ValueError(f"max_points must be >= 1, got {max_points}")
 
-    bias = geometric_bias(spec, gen_bounds)
+    bias = geometric_bias(spec, gen_region)
     if abs(bias["bias"]) > _BIAS_WARN_THRESHOLD:
         logger.warning(
-            "Box geometry skews the size distribution: the shortest edge "
-            "leaves large particles few admissible positions, shifting the "
-            "mean radius %.1f%% (requested %.4g, admissible %.4g). Widen "
-            "the box, narrow the radius range, or expect a small-biased "
+            "Container geometry skews the size distribution: it leaves "
+            "large particles few admissible positions, shifting the mean "
+            "radius %.1f%% (requested %.4g, admissible %.4g). Enlarge the "
+            "container, narrow the radius range, or expect a small-biased "
             "packing.",
             bias["bias"] * 100.0,
             bias["requested_mean"],
@@ -492,7 +502,9 @@ def sample(
     else:
         seed_int = int(seed) % (2**31 - 1)
 
+    box = gen_region.bounding_box
     args = (
+        gen_region.kind,
         spec.kind,
         spec.values,
         spec.cdf,
@@ -505,14 +517,10 @@ def sample(
         max_points_int,
     )
 
-    if gen_bounds.shape[0] == 2:
-        points, out_radii, status = _kernels._sample_2d(
-            gen_bounds[0], gen_bounds[1], *args
-        )
+    if gen_region.dimensions == 2:
+        points, out_radii, status = _kernels._sample_2d(box[0], box[1], *args)
     else:
-        points, out_radii, status = _kernels._sample_3d(
-            gen_bounds[0], gen_bounds[1], gen_bounds[2], *args
-        )
+        points, out_radii, status = _kernels._sample_3d(box[0], box[1], box[2], *args)
 
     if status == _kernels.STATUS_MAX_POINTS:
         logger.warning(
@@ -526,7 +534,7 @@ def sample(
     return Packing(
         points=points,
         radii=out_radii,
-        bounds=out_bounds,
+        region=out_region,
         spec=spec,
         spacing=float(spacing),
         scale=scale,
@@ -538,7 +546,7 @@ def sample(
 
 
 def poisson_disc_samples(
-    bounds: Sequence[float] | np.ndarray,
+    region: Region | Sequence[float] | np.ndarray,
     radii: RadiusSpec | Sequence[float] | np.ndarray | float,
     repetitions: int = 30,
     *,
@@ -554,8 +562,8 @@ def poisson_disc_samples(
 
     Parameters
     ----------
-    bounds : array_like
-        Box edge lengths; 2 or 3 entries.
+    region : Box or Ball or array_like
+        The container to fill; a sequence is read as box edge lengths.
     radii : RadiusSpec or array_like or float
         Radius distribution, as for :func:`sample`.
     repetitions : int, optional
@@ -587,7 +595,7 @@ def poisson_disc_samples(
     True
     """
     pack = sample(
-        bounds,
+        region,
         radii,
         weights=weights,
         repetitions=repetitions,
