@@ -51,7 +51,7 @@ from polydisc.sampling import (
 )
 from polydisc.spacing import apply_spacing, expected_gap, spacing_scale
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Ball",

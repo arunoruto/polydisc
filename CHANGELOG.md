@@ -7,6 +7,42 @@ next to it.
 
 <!-- version list -->
 
+## v0.4.0 (2026-10-15)
+
+### Bug Fixes
+
+- Make thin slabs fill, and the 3D view visible
+  ([`2e4b648`](https://github.com/arunoruto/polydisc/commit/2e4b648c82d8325f9a1e93fedffccbdf3b7a68fa))
+
+### Build System
+
+- Release metadata, semantic-release config, relaxed NumPy pin
+  ([`40fa33b`](https://github.com/arunoruto/polydisc/commit/40fa33ba65488380e578a896f6d45095ee28299c))
+
+### Chores
+
+- Ignore papers/
+  ([`10d3b69`](https://github.com/arunoruto/polydisc/commit/10d3b694745dfe6a3cd4d1906c4778c9406d5c45))
+
+### Continuous Integration
+
+- Test on Python 3.13 and 3.14, release to PyPI by hand
+  ([`0a5dd68`](https://github.com/arunoruto/polydisc/commit/0a5dd681d44bd701754b5aed4d316cbbf8f128e8))
+
+### Documentation
+
+- README in Best-README-Template layout, changelog with 0.4.0 notes
+  ([`da74f03`](https://github.com/arunoruto/polydisc/commit/da74f03c9f3ec36e3efde8f6be85723bc824b935))
+
+### Features
+
+- Add deployable dashboard, optional streamlit
+  ([`0d8c6ff`](https://github.com/arunoruto/polydisc/commit/0d8c6ff4b19a2bf0dcdc0f61a7c091e682c9c4f9))
+
+- Periodic box axes and a minimum surface gap
+  ([`5b1edac`](https://github.com/arunoruto/polydisc/commit/5b1edac647c55ca82397e3fb7692965ff097a1c9))
+
+
 ## 0.4.0 release notes
 
 The first release on PyPI, and the first under the name `polydisc`
