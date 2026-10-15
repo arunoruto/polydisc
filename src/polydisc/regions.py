@@ -8,6 +8,9 @@ acceleration grid can index them the same way.
 
 A "carpet" is not a separate shape -- it is a :class:`Box` whose third
 edge is close to a particle diameter.  See the README for the recipe.
+
+A :class:`Box` may be periodic along any of its axes, so the packing is
+one cell of an infinite (or laterally infinite) tiling.
 """
 
 from __future__ import annotations
@@ -33,16 +36,25 @@ class Box:
     bounds : array_like
         Edge lengths; two entries for 2D, three for 3D.  All must be
         finite and positive.
+    periodic : bool or sequence of bool, default False
+        Which axes wrap around.  A single bool applies to every axis.
+        Along a periodic axis a particle leaving one face re-enters
+        through the opposite one and distances follow the minimum-image
+        convention, so copies of the box tile space without overlaps.
+        The other axes keep hard walls that particles stay inside.
 
     Attributes
     ----------
     bounds : numpy.ndarray
         The validated edge lengths.
+    periodic : tuple of bool
+        One flag per axis.
 
     Raises
     ------
     ValueError
-        If `bounds` is not 2 or 3 finite, positive numbers.
+        If `bounds` is not 2 or 3 finite, positive numbers, or
+        `periodic` does not have one entry per axis.
 
     Examples
     --------
@@ -51,9 +63,16 @@ class Box:
     (2, 5000.0)
     >>> box.max_particle_radius
     25.0
+
+    A slab that is periodic sideways, with hard top and bottom faces:
+
+    >>> slab = Box([32.0, 32.0, 44.0], periodic=(True, True, False))
+    >>> slab.label
+    'box, 32 x 32 x 44, periodic x, y'
     """
 
     bounds: np.ndarray
+    periodic: Any = False
 
     def __post_init__(self) -> None:
         arr = np.asarray(self.bounds, dtype=np.float64).ravel()
@@ -65,7 +84,16 @@ class Box:
             raise ValueError("bounds must all be finite")
         if np.any(arr <= 0.0):
             raise ValueError(f"bounds must all be > 0, got {arr.tolist()}")
+        flags = self.periodic
+        if isinstance(flags, (bool, np.bool_)):
+            flags = (bool(flags),) * arr.shape[0]
+        flags = tuple(bool(f) for f in flags)
+        if len(flags) != arr.shape[0]:
+            raise ValueError(
+                f"periodic needs one flag per axis ({arr.shape[0]}), got {len(flags)}"
+            )
         object.__setattr__(self, "bounds", arr)
+        object.__setattr__(self, "periodic", flags)
 
     kind = KIND_BOX
 
@@ -77,10 +105,13 @@ class Box:
         """
         if not isinstance(other, Box):
             return NotImplemented
-        return bool(np.array_equal(self.bounds, other.bounds))
+        return (
+            bool(np.array_equal(self.bounds, other.bounds))
+            and self.periodic == other.periodic
+        )
 
     def __hash__(self) -> int:
-        return hash(tuple(self.bounds.tolist()))
+        return hash((tuple(self.bounds.tolist()), self.periodic))
 
     @property
     def dimensions(self) -> int:
@@ -104,8 +135,13 @@ class Box:
 
     @property
     def max_particle_radius(self) -> float:
-        """Largest radius that can fit, ignoring other particles."""
-        return float(np.min(self.bounds)) / 2.0
+        """Largest radius that can fit, ignoring other particles.
+
+        A hard axis must hold one diameter; a periodic axis two, so that
+        the minimum image of a neighbour is unambiguous.
+        """
+        per = np.asarray(self.periodic)
+        return float(np.min(np.where(per, self.bounds / 2.0, self.bounds))) / 2.0
 
     def scaled(self, factor: float) -> Box:
         """Return a copy with every edge multiplied by `factor`.
@@ -120,7 +156,7 @@ class Box:
         Box
             The scaled region.
         """
-        return Box(self.bounds * float(factor))
+        return Box(self.bounds * float(factor), self.periodic)
 
     def contains(self, points: np.ndarray, radii: np.ndarray) -> np.ndarray:
         """Test which particles lie wholly inside the region.
@@ -135,16 +171,26 @@ class Box:
         Returns
         -------
         numpy.ndarray
-            Boolean ``(N,)`` mask, true where the particle fits.
+            Boolean ``(N,)`` mask, true where the particle fits.  Along
+            a periodic axis only the centre has to lie in the box.
         """
         pts = np.asarray(points, dtype=np.float64)
         rad = np.asarray(radii, dtype=np.float64).reshape(-1, 1)
-        return np.all((pts >= rad) & (pts <= self.bounds[None, :] - rad), axis=1)
+        per = np.asarray(self.periodic)[None, :]
+        hi = self.bounds[None, :]
+        inside = np.where(
+            per, (pts >= 0.0) & (pts < hi), (pts >= rad) & (pts <= hi - rad)
+        )
+        return np.all(inside, axis=1)
 
     @property
     def label(self) -> str:
         """One-line description, e.g. ``"box, 400 x 400"``."""
-        return "box, " + " x ".join(f"{b:g}" for b in self.bounds)
+        text = "box, " + " x ".join(f"{b:g}" for b in self.bounds)
+        if any(self.periodic):
+            axes = ", ".join("xyz"[i] for i, p in enumerate(self.periodic) if p)
+            text += f", periodic {axes}"
+        return text
 
     def admissible_measure(self, radii: np.ndarray) -> np.ndarray:
         """Measure of the sub-region a particle's centre may occupy.
@@ -159,7 +205,8 @@ class Box:
         numpy.ndarray
             For each radius, the area/volume of the shrunken box
             ``bounds - 2 * r``, zero where the particle cannot fit.
-            Only relative values matter to callers.
+            Periodic axes are not shrunk.  Only relative values matter
+            to callers.
 
         See Also
         --------
@@ -168,11 +215,15 @@ class Box:
         """
         rad = np.asarray(radii, dtype=np.float64).ravel()
         room = np.clip(self.bounds[None, :] - 2.0 * rad[:, None], 0.0, None)
+        room = np.where(np.asarray(self.periodic)[None, :], self.bounds[None, :], room)
         return np.prod(room, axis=1)
 
     def describe(self) -> dict[str, Any]:
         """Summarise the region as a JSON-friendly mapping."""
-        return {"shape": "box", "bounds": self.bounds.tolist()}
+        out: dict[str, Any] = {"shape": "box", "bounds": self.bounds.tolist()}
+        if any(self.periodic):
+            out["periodic"] = list(self.periodic)
+        return out
 
 
 @dataclass(frozen=True)
@@ -387,7 +438,7 @@ def region_from_metadata(meta: dict[str, Any] | None) -> Region | None:
         return None
     try:
         if meta.get("shape") == "box":
-            return Box(meta["bounds"])
+            return Box(meta["bounds"], meta.get("periodic", False))
         if meta.get("shape") == "ball":
             return Ball(meta["radius"], meta.get("dimensions", 3))
     except (KeyError, ValueError, TypeError):

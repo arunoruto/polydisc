@@ -22,6 +22,16 @@ Cell contents
     cell, ``next`` per point).  Memory is then proportional to the
     number of *points*, not to the number of grid cells.
 
+Gap and periodic axes
+    A minimum surface ``gap`` widens every contact distance to
+    ``r_i + r_j + gap`` and the cells to ``2 * rmax + gap``, so the scan
+    stays 3x3(x3).  A periodic axis wraps candidates that leave one face
+    back in through the other, its cells are widened so a whole number
+    of them tiles the length, the neighbour scan wraps around the grid,
+    and distances along it use the minimum-image convention.  With
+    ``gap = 0`` and no periodic axis every expression reduces to the
+    original one exactly, so seeded results are bit-identical.
+
 Everything in the hot loop is scalar: no temporary arrays are allocated
 per candidate, which is where a natural NumPy-style translation spends
 most of its time under Numba.
@@ -106,6 +116,55 @@ def _random_direction_3d():
 
 
 @njit(cache=True)
+def _periodic_cells(length, cell):
+    """Cell count and widened cell size that tile a periodic `length`."""
+    count = max(1, int(length // cell))
+    return count, length / count
+
+
+@njit(cache=True)
+def _wrap(x, length):
+    """Map `x` into ``[0, length)``."""
+    x -= length * np.floor(x / length)
+    if x >= length:
+        x -= length
+    return x
+
+
+@njit(cache=True)
+def _scan_range(c, g, count, periodic):
+    """Cell offsets to scan along one axis, ``[lo, hi)``.
+
+    On a periodic axis the offsets may run off the grid and are wrapped
+    by the caller; a window that would visit a cell twice covers the
+    whole axis instead.
+    """
+    if periodic:
+        if 2 * g + 1 >= count:
+            return 0, count
+        return c - g, c + g + 1
+    return max(0, c - g), min(count, c + g + 1)
+
+
+@njit(cache=True)
+def _wrap_cell(g, count):
+    """Wrap a cell offset back onto ``[0, count)``."""
+    if g < 0:
+        return g + count
+    if g >= count:
+        return g - count
+    return g
+
+
+@njit(cache=True)
+def _min_image(d, length, periodic):
+    """Minimum-image component of a separation along one axis."""
+    if periodic:
+        return d - length * np.floor(d / length + 0.5)
+    return d
+
+
+@njit(cache=True)
 def _draw_radii(count, kind, values, cdf, p0, p1, rmin, rmax, seed):
     """Draw `count` independent radii from one distribution.
 
@@ -121,7 +180,22 @@ def _draw_radii(count, kind, values, cdf, p0, p1, rmin, rmax, seed):
 
 @njit(cache=True)
 def _sample_2d(
-    bx, by, region, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_points
+    bx,
+    by,
+    region,
+    kind,
+    values,
+    cdf,
+    p0,
+    p1,
+    rmin,
+    rmax,
+    k,
+    seed,
+    max_points,
+    gap=0.0,
+    perx=False,
+    pery=False,
 ):
     """Sample non-overlapping discs inside a 2D region.
 
@@ -129,14 +203,24 @@ def _sample_2d(
     inscribed in it, selected by `region`; the acceleration grid spans
     the box either way, which just leaves the corner cells empty.
 
+    Every pair ends up at least ``r_i + r_j + gap`` apart; `perx` and
+    `pery` make that axis periodic (box only).
+
     Returns ``(points, radii, status)``; see :data:`STATUS_SATURATED`.
-    Callers must guarantee that the largest particle fits.
+    Callers must guarantee that the largest particle fits, and that a
+    periodic length is at least ``2 * (2 * rmax + gap)``.
     """
     np.random.seed(seed)
 
-    cell = 2.0 * rmax
+    cell = 2.0 * rmax + gap
     nx = max(1, int(np.ceil(bx / cell)))
     ny = max(1, int(np.ceil(by / cell)))
+    cellx = cell
+    celly = cell
+    if perx:
+        nx, cellx = _periodic_cells(bx, cell)
+    if pery:
+        ny, celly = _periodic_cells(by, cell)
     head = np.full(nx * ny, -1, dtype=np.int64)
 
     # Ball centre and radius, unused for a box region.
@@ -162,11 +246,17 @@ def _sample_2d(
         x0 = hx + span * np.cos(theta)
         y0 = hy + span * np.sin(theta)
     else:
-        x0 = r0 + np.random.random() * (bx - 2.0 * r0)
-        y0 = r0 + np.random.random() * (by - 2.0 * r0)
+        if perx:
+            x0 = np.random.random() * bx
+        else:
+            x0 = r0 + np.random.random() * (bx - 2.0 * r0)
+        if pery:
+            y0 = np.random.random() * by
+        else:
+            y0 = r0 + np.random.random() * (by - 2.0 * r0)
 
-    cx = min(nx - 1, max(0, int(x0 / cell)))
-    cy = min(ny - 1, max(0, int(y0 / cell)))
+    cx = min(nx - 1, max(0, int(x0 / cellx)))
+    cy = min(ny - 1, max(0, int(y0 / celly)))
     pts[0, 0] = x0
     pts[0, 1] = y0
     rad[0] = r0
@@ -203,7 +293,7 @@ def _sample_2d(
             outside = True
             for _ in range(_BOUNDS_RETRIES):
                 theta = TWO_PI * np.random.random()
-                dist = (pr + tr) * (1.0 + np.random.random())
+                dist = (pr + tr + gap) * (1.0 + np.random.random())
                 tx = px + dist * np.cos(theta)
                 ty = py + dist * np.sin(theta)
 
@@ -213,30 +303,35 @@ def _sample_2d(
                     span = hx - tr
                     outside = ddx * ddx + ddy * ddy > span * span
                 else:
-                    outside = tx < tr or tx > bx - tr or ty < tr or ty > by - tr
+                    # A periodic axis wraps the candidate (snake-style)
+                    # instead of rejecting it.
+                    if perx:
+                        tx = _wrap(tx, bx)
+                    if pery:
+                        ty = _wrap(ty, by)
+                    outside = (not perx and (tx < tr or tx > bx - tr)) or (
+                        not pery and (ty < tr or ty > by - tr)
+                    )
                 if not outside:
                     break
             if outside:
                 continue
 
-            cx = min(nx - 1, max(0, int(tx / cell)))
-            cy = min(ny - 1, max(0, int(ty / cell)))
-            gr = int(np.ceil((tr + rmax) / cell))
-
-            gx0 = max(0, cx - gr)
-            gx1 = min(nx, cx + gr + 1)
-            gy0 = max(0, cy - gr)
-            gy1 = min(ny, cy + gr + 1)
+            cx = min(nx - 1, max(0, int(tx / cellx)))
+            cy = min(ny - 1, max(0, int(ty / celly)))
+            reach = tr + rmax + gap
+            gx0, gx1 = _scan_range(cx, int(np.ceil(reach / cellx)), nx, perx)
+            gy0, gy1 = _scan_range(cy, int(np.ceil(reach / celly)), ny, pery)
 
             collision = False
-            for gx in range(gx0, gx1):
-                base = gx * ny
-                for gy in range(gy0, gy1):
-                    j = head[base + gy]
+            for ox in range(gx0, gx1):
+                base = _wrap_cell(ox, nx) * ny
+                for oy in range(gy0, gy1):
+                    j = head[base + _wrap_cell(oy, ny)]
                     while j != -1:
-                        dx = tx - pts[j, 0]
-                        dy = ty - pts[j, 1]
-                        md = tr + rad[j]
+                        dx = _min_image(tx - pts[j, 0], bx, perx)
+                        dy = _min_image(ty - pts[j, 1], by, pery)
+                        md = tr + rad[j] + gap
                         if dx * dx + dy * dy < md * md:
                             collision = True
                             break
@@ -292,22 +387,50 @@ def _sample_2d(
 
 @njit(cache=True)
 def _sample_3d(
-    bx, by, bz, region, kind, values, cdf, p0, p1, rmin, rmax, k, seed, max_points
+    bx,
+    by,
+    bz,
+    region,
+    kind,
+    values,
+    cdf,
+    p0,
+    p1,
+    rmin,
+    rmax,
+    k,
+    seed,
+    max_points,
+    gap=0.0,
+    perx=False,
+    pery=False,
+    perz=False,
 ):
     """Sample non-overlapping spheres inside a 3D region.
 
     The region is either the box ``[0, bx] x [0, by] x [0, bz]`` or the
     ball inscribed in it, selected by `region`.
 
+    `gap`, `perx`, `pery` and `perz` work as in :func:`_sample_2d`.
+
     Returns ``(points, radii, status)``.  Callers must guarantee that
     the largest particle fits.
     """
     np.random.seed(seed)
 
-    cell = 2.0 * rmax
+    cell = 2.0 * rmax + gap
     nx = max(1, int(np.ceil(bx / cell)))
     ny = max(1, int(np.ceil(by / cell)))
     nz = max(1, int(np.ceil(bz / cell)))
+    cellx = cell
+    celly = cell
+    cellz = cell
+    if perx:
+        nx, cellx = _periodic_cells(bx, cell)
+    if pery:
+        ny, celly = _periodic_cells(by, cell)
+    if perz:
+        nz, cellz = _periodic_cells(bz, cell)
     head = np.full(nx * ny * nz, -1, dtype=np.int64)
 
     # Ball centre and radius, unused for a box region.
@@ -331,13 +454,22 @@ def _sample_3d(
         y0 = hy + span * uy
         z0 = hz + span * uz
     else:
-        x0 = r0 + np.random.random() * (bx - 2.0 * r0)
-        y0 = r0 + np.random.random() * (by - 2.0 * r0)
-        z0 = r0 + np.random.random() * (bz - 2.0 * r0)
+        if perx:
+            x0 = np.random.random() * bx
+        else:
+            x0 = r0 + np.random.random() * (bx - 2.0 * r0)
+        if pery:
+            y0 = np.random.random() * by
+        else:
+            y0 = r0 + np.random.random() * (by - 2.0 * r0)
+        if perz:
+            z0 = np.random.random() * bz
+        else:
+            z0 = r0 + np.random.random() * (bz - 2.0 * r0)
 
-    cx = min(nx - 1, max(0, int(x0 / cell)))
-    cy = min(ny - 1, max(0, int(y0 / cell)))
-    cz = min(nz - 1, max(0, int(z0 / cell)))
+    cx = min(nx - 1, max(0, int(x0 / cellx)))
+    cy = min(ny - 1, max(0, int(y0 / celly)))
+    cz = min(nz - 1, max(0, int(z0 / cellz)))
     pts[0, 0] = x0
     pts[0, 1] = y0
     pts[0, 2] = z0
@@ -371,7 +503,7 @@ def _sample_3d(
             tz = 0.0
             outside = True
             for _ in range(_BOUNDS_RETRIES):
-                dist = (pr + tr) * (1.0 + np.random.random())
+                dist = (pr + tr + gap) * (1.0 + np.random.random())
 
                 if region == REGION_BALL:
                     ux, uy, uz = _random_direction_3d()
@@ -392,8 +524,13 @@ def _sample_3d(
                     # rejection at all.  That is what lets a carpet fill:
                     # in a box barely thicker than one particle, a blind
                     # direction lands inside perhaps one time in eighty.
-                    zlo = max(pz - dist, tr)
-                    zhi = min(pz + dist, bz - tr)
+                    # A periodic z needs no clipping, only wrapping.
+                    if perz:
+                        zlo = pz - dist
+                        zhi = pz + dist
+                    else:
+                        zlo = max(pz - dist, tr)
+                        zhi = min(pz + dist, bz - tr)
                     if zhi < zlo:
                         continue
                     tz = zlo + np.random.random() * (zhi - zlo)
@@ -402,35 +539,40 @@ def _sample_3d(
                     theta = TWO_PI * np.random.random()
                     tx = px + horizontal * np.cos(theta)
                     ty = py + horizontal * np.sin(theta)
-                    outside = tx < tr or tx > bx - tr or ty < tr or ty > by - tr
+                    if perx:
+                        tx = _wrap(tx, bx)
+                    if pery:
+                        ty = _wrap(ty, by)
+                    if perz:
+                        tz = _wrap(tz, bz)
+                    outside = (not perx and (tx < tr or tx > bx - tr)) or (
+                        not pery and (ty < tr or ty > by - tr)
+                    )
                 if not outside:
                     break
             if outside:
                 continue
 
-            cx = min(nx - 1, max(0, int(tx / cell)))
-            cy = min(ny - 1, max(0, int(ty / cell)))
-            cz = min(nz - 1, max(0, int(tz / cell)))
-            gr = int(np.ceil((tr + rmax) / cell))
-
-            gx0 = max(0, cx - gr)
-            gx1 = min(nx, cx + gr + 1)
-            gy0 = max(0, cy - gr)
-            gy1 = min(ny, cy + gr + 1)
-            gz0 = max(0, cz - gr)
-            gz1 = min(nz, cz + gr + 1)
+            cx = min(nx - 1, max(0, int(tx / cellx)))
+            cy = min(ny - 1, max(0, int(ty / celly)))
+            cz = min(nz - 1, max(0, int(tz / cellz)))
+            reach = tr + rmax + gap
+            gx0, gx1 = _scan_range(cx, int(np.ceil(reach / cellx)), nx, perx)
+            gy0, gy1 = _scan_range(cy, int(np.ceil(reach / celly)), ny, pery)
+            gz0, gz1 = _scan_range(cz, int(np.ceil(reach / cellz)), nz, perz)
 
             collision = False
-            for gx in range(gx0, gx1):
-                for gy in range(gy0, gy1):
-                    base = (gx * ny + gy) * nz
-                    for gz in range(gz0, gz1):
-                        j = head[base + gz]
+            for ox in range(gx0, gx1):
+                gx = _wrap_cell(ox, nx)
+                for oy in range(gy0, gy1):
+                    base = (gx * ny + _wrap_cell(oy, ny)) * nz
+                    for oz in range(gz0, gz1):
+                        j = head[base + _wrap_cell(oz, nz)]
                         while j != -1:
-                            dx = tx - pts[j, 0]
-                            dy = ty - pts[j, 1]
-                            dz = tz - pts[j, 2]
-                            md = tr + rad[j]
+                            dx = _min_image(tx - pts[j, 0], bx, perx)
+                            dy = _min_image(ty - pts[j, 1], by, pery)
+                            dz = _min_image(tz - pts[j, 2], bz, perz)
+                            md = tr + rad[j] + gap
                             if dx * dx + dy * dy + dz * dz < md * md:
                                 collision = True
                                 break

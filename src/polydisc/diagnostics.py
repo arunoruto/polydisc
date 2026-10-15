@@ -18,6 +18,7 @@ Spacing
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -35,7 +36,9 @@ from polydisc.sampling import Packing, geometric_bias
 OVERLAP_TOLERANCE = 1e-9
 
 
-def nearest_neighbour_gaps(points: np.ndarray, radii: np.ndarray) -> np.ndarray:
+def nearest_neighbour_gaps(
+    points: np.ndarray, radii: np.ndarray, region: Region | None = None
+) -> np.ndarray:
     """Surface-to-surface distance from each particle to its closest.
 
     Parameters
@@ -44,6 +47,10 @@ def nearest_neighbour_gaps(points: np.ndarray, radii: np.ndarray) -> np.ndarray:
         Particle centres, ``D`` being 2 or 3.
     radii : (N,) array_like
         Particle radii.
+    region : Box or Ball, optional
+        The container.  Only a :class:`~polydisc.regions.Box` with
+        periodic axes changes the result: neighbours across its periodic
+        faces count too (minimum image).
 
     Returns
     -------
@@ -61,6 +68,9 @@ def nearest_neighbour_gaps(points: np.ndarray, radii: np.ndarray) -> np.ndarray:
     -----
     Exact, not approximate: the search walks outward in cell shells and
     stops only once no unvisited shell could contain a closer surface.
+    Periodic axes are handled by adding the shifted copies of every
+    particle (``3 ** p`` copies for ``p`` periodic axes) and keeping the
+    originals' results.
 
     Examples
     --------
@@ -82,6 +92,15 @@ def nearest_neighbour_gaps(points: np.ndarray, radii: np.ndarray) -> np.ndarray:
     if n < 2:
         return np.full(n, np.inf, dtype=np.float64)
 
+    periodic = getattr(region, "periodic", ())
+    if any(periodic):
+        bounds = region.bounding_box
+        steps = [(-1, 0, 1) if p else (0,) for p in periodic]
+        shifts = [np.asarray(s) * bounds for s in itertools.product(*steps) if any(s)]
+        pts = np.concatenate([pts, *(pts + s for s in shifts)])
+        rad = np.tile(rad, len(shifts) + 1)
+        return nearest_neighbour_gaps(pts, rad)[:n]
+
     if pts.shape[1] == 2:
         pts3 = np.zeros((n, 3), dtype=np.float64)
         pts3[:, :2] = pts
@@ -102,7 +121,9 @@ def nearest_neighbour_gaps(points: np.ndarray, radii: np.ndarray) -> np.ndarray:
     return _nearest_gaps(pts3, rad, cell, nx, ny, nz, head, nxt, rmax)
 
 
-def gap_report(points: np.ndarray, radii: np.ndarray) -> dict[str, Any]:
+def gap_report(
+    points: np.ndarray, radii: np.ndarray, region: Region | None = None
+) -> dict[str, Any]:
     """Summarise nearest-neighbour clearances in a packing.
 
     Parameters
@@ -111,6 +132,9 @@ def gap_report(points: np.ndarray, radii: np.ndarray) -> dict[str, Any]:
         Particle centres.
     radii : (N,) array_like
         Particle radii.
+    region : Box or Ball, optional
+        The container; periodic box axes are measured with the minimum
+        image, see :func:`nearest_neighbour_gaps`.
 
     Returns
     -------
@@ -126,7 +150,7 @@ def gap_report(points: np.ndarray, radii: np.ndarray) -> dict[str, Any]:
     nearest_neighbour_gaps : The per-particle values summarised here.
     """
     rad = np.asarray(radii, dtype=np.float64).ravel()
-    gaps = nearest_neighbour_gaps(points, rad)
+    gaps = nearest_neighbour_gaps(points, rad, region)
     finite = gaps[np.isfinite(gaps)]
 
     if finite.size == 0:
@@ -447,7 +471,7 @@ def report(packing: Packing) -> Report:
         projected_area_fraction=projected,
         radii=radius_report(packing.radii, packing.spec),
         boundary_bias=geometric_bias(packing.spec, packing.generation_region),
-        gaps=gap_report(packing.points, packing.radii),
+        gaps=gap_report(packing.points, packing.radii, packing.region),
         spacing=float(packing.spacing),
         saturated=bool(packing.saturated),
     )

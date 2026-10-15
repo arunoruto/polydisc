@@ -93,3 +93,43 @@ def assert_inside(
     assert np.all(points <= bounds[None, :] - radii[:, None] + slack), (
         "particle crosses the high face"
     )
+
+
+def periodic_min_gaps(
+    points: np.ndarray, radii: np.ndarray, bounds: np.ndarray, periodic
+) -> np.ndarray:
+    """Nearest-neighbour gaps in the 3x3(x3) tiling of a periodic box.
+
+    Every particle is compared, all-pairs, against every particle of the
+    box and of its neighbouring copies along the periodic axes -- the
+    tiling itself, not the minimum-image arithmetic the code under test
+    uses.
+
+    Parameters
+    ----------
+    points : (N, D) numpy.ndarray
+        Particle centres.
+    radii : (N,) numpy.ndarray
+        Particle radii.
+    bounds : (D,) numpy.ndarray
+        Box edge lengths.
+    periodic : sequence of bool
+        Which axes are tiled.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(N,)`` gaps to the closest other particle or copy.
+    """
+    import itertools
+
+    steps = [(-1, 0, 1) if p else (0,) for p in periodic]
+    best = np.full(points.shape[0], np.inf)
+    for shift in itertools.product(*steps):
+        moved = points + np.asarray(shift) * bounds
+        diff = points[:, None, :] - moved[None, :, :]
+        gaps = np.sqrt(np.sum(diff * diff, axis=-1)) - radii[:, None] - radii[None, :]
+        if not any(shift):
+            np.fill_diagonal(gaps, np.inf)
+        best = np.minimum(best, gaps.min(axis=1))
+    return best
