@@ -7,8 +7,8 @@
 # its runtime dependencies are listed alongside the dashboard extra.
 # tests/test_dashboard.py checks this stays in step with pyproject.toml.
 
-numpy>=2.3.0,<2.4
-numba>=0.62
+numpy>=2.3.0
+numba>=0.63
 click>=8.1
 pyyaml>=6.0
 streamlit>=1.40

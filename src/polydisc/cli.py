@@ -373,6 +373,7 @@ def _build_region(
     bounds: str | None,
     ball_radius: float | None,
     dims: int | None,
+    periodic: str | None = None,
 ) -> Region:
     """Turn CLI/config container options into a region.
 
@@ -388,8 +389,15 @@ def _build_region(
         or malformed.
     """
     shape = (_pick(cfg, "shape", shape) or "box").lower()
+    axes = str(_pick(cfg, "periodic", periodic) or "").lower()
+    if set(axes) - set("xyz"):
+        raise click.BadParameter(
+            f"--periodic takes axis letters, e.g. xy; got {axes!r}"
+        )
 
     if shape in ("ball", "sphere"):
+        if axes:
+            raise click.BadParameter("--periodic applies to a box, not a ball")
         radius = _pick(cfg, "ball_radius", ball_radius, coerce="float")
         if radius is None:
             raise click.BadParameter(f"--shape {shape} needs --ball-radius")
@@ -413,7 +421,7 @@ def _build_region(
     if edges is None:
         raise click.BadParameter("--bounds must list 2 or 3 numbers")
     try:
-        return Box(edges)
+        return Box(edges, tuple(a in axes for a in "xyz"[: edges.shape[0]]))
     except ValueError as exc:
         raise click.BadParameter(str(exc)) from exc
 
@@ -522,6 +530,13 @@ def _sampling_options[F: Callable[..., Any]](func: F) -> F:
             "particle between neighbours  [default: 0]",
         ),
         click.option(
+            "--gap",
+            type=click.FloatRange(min=0.0),
+            default=None,
+            help="Minimum surface-to-surface distance between particles, "
+            "in radius units  [default: 0]",
+        ),
+        click.option(
             "--fit-bounds/--no-fit-bounds",
             default=None,
             help="Keep the requested extent when spacing is applied "
@@ -570,9 +585,11 @@ def _resolve_common(
     repetitions: int | None,
     max_points: int | None,
     seed: int | None,
+    gap: float | None = None,
 ) -> dict[str, Any]:
     """Resolve the non-radius sampling options from CLI plus config."""
     spacing = _pick(cfg, "spacing", spacing, coerce="float")
+    gap = _pick(cfg, "gap", gap, coerce="float")
     fit_bounds = _pick(cfg, "fit_bounds", fit_bounds, coerce="bool")
     repetitions = _pick(cfg, "repetitions", repetitions, coerce="int")
     max_points = _pick(cfg, "max_points", max_points, coerce="int")
@@ -583,6 +600,7 @@ def _resolve_common(
         "repetitions": 30 if repetitions is None else int(repetitions),
         "max_points": max_points,
         "seed": seed,
+        "gap": 0.0 if gap is None else float(gap),
     }
 
 
@@ -622,12 +640,18 @@ def cli() -> None:
     default=None,
     help="Dimension of a ball container  [default: 3]",
 )
+@click.option(
+    "--periodic",
+    default=None,
+    help="Box axes that wrap around, e.g. xy for a laterally periodic slab",
+)
 @_sampling_options
 def generate(
     shape: str | None,
     bounds: str | None,
     ball_radius: float | None,
     dims: int | None,
+    periodic: str | None,
     config: str | None,
     **kwargs: Any,
 ) -> None:
@@ -639,12 +663,19 @@ def generate(
       polydisc generate --shape ball --ball-radius 100 --radii 2,4
       polydisc generate --bounds 500,500,4.1 --dist lognormal \\
           --gmean 1 --gstd 1.3 --spacing 2 --out carpet.npz
+      polydisc generate --bounds 32,32,44 --periodic xy --gap 0.25 \\
+          --dist lognormal --gmean 1 --gstd 1.35 --rmin 0.33 --rmax 1.67
     """
     _configure_logging(kwargs.pop("verbose", False))
     cfg = _config_from(config, kwargs.pop("config_format"), kwargs.pop("profile"))
 
     region = _build_region(
-        cfg, shape=shape, bounds=bounds, ball_radius=ball_radius, dims=dims
+        cfg,
+        shape=shape,
+        bounds=bounds,
+        ball_radius=ball_radius,
+        dims=dims,
+        periodic=periodic,
     )
     spec = _build_spec(cfg, **_spec_kwargs(kwargs))
     common = _resolve_common(
@@ -654,6 +685,7 @@ def generate(
         kwargs.pop("repetitions"),
         kwargs.pop("max_points"),
         kwargs.pop("seed"),
+        kwargs.pop("gap"),
     )
 
     try:

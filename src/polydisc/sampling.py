@@ -59,6 +59,9 @@ class Packing:
     saturated : bool
         True when sampling ran until no active point remained, False
         when it stopped at ``max_points``.
+    gap : float
+        Requested minimum surface-to-surface distance between any two
+        particles, in the units of the radii.
 
     Attributes
     ----------
@@ -91,6 +94,7 @@ class Packing:
     seed: int = 0
     repetitions: int = 30
     saturated: bool = True
+    gap: float = 0.0
 
     @property
     def n(self) -> int:
@@ -134,7 +138,8 @@ class Packing:
         -------
         float
             Area fraction in 2D, volume fraction in 3D.  Particles are
-            entirely inside the region, so this never exceeds one.
+            entirely inside the region -- or, across a periodic face,
+            inside its tiling -- so this never exceeds one.
         """
         capacity = self.region.volume
         if capacity <= 0.0:
@@ -165,6 +170,7 @@ class Packing:
             "seed": int(self.seed),
             "repetitions": int(self.repetitions),
             "saturated": bool(self.saturated),
+            "gap": float(self.gap),
             "fill_fraction": self.fill_fraction,
             "radii": self.spec.describe(),
         }
@@ -243,6 +249,7 @@ class Packing:
             seed=int(meta.get("seed", 0)),
             repetitions=int(meta.get("repetitions", 30)),
             saturated=bool(meta.get("saturated", True)),
+            gap=float(meta.get("gap", 0.0)),
         )
 
 
@@ -384,6 +391,7 @@ def sample(
     spacing: float = 0.0,
     fit_bounds: bool = True,
     max_points: int | None = None,
+    gap: float = 0.0,
 ) -> Packing:
     """Fill a box or a ball with a polydisperse Poisson-disc packing.
 
@@ -393,7 +401,8 @@ def sample(
         The container to fill.  A plain sequence of edge lengths is read
         as a :class:`~polydisc.regions.Box`, two entries for 2D or three
         for 3D.  A flat carpet is a box whose third edge is close to a
-        particle diameter.
+        particle diameter.  ``Box(..., periodic=...)`` makes chosen axes
+        wrap around, so the result tiles space along them.
     radii : RadiusSpec or array_like or float
         Radius distribution.  A float or sequence is read as a discrete
         set of allowed radii; use :class:`~polydisc.radii.RadiusSpec`
@@ -420,6 +429,13 @@ def sample(
     max_points : int, optional
         Stop after this many particles.  Defaults to a geometric upper
         bound that never truncates a real run.
+    gap : float, optional
+        Minimum surface-to-surface distance between any two particles,
+        in the units of the radii: every pair ends up with
+        ``|c_i - c_j| >= r_i + r_j + gap``, across periodic faces too
+        (minimum image).  Unlike `spacing` this is a hard constraint
+        during sampling, not a dilation afterwards; the packing still
+        saturates.  Walls are not affected.  Default 0.
 
     Returns
     -------
@@ -430,8 +446,10 @@ def sample(
     ------
     ValueError
         If `region` is malformed, `repetitions` or `max_points` is
-        below one, `spacing` is negative, or the largest possible
-        particle cannot fit in the (possibly pre-shrunk) container.
+        below one, `spacing` or `gap` is negative, the largest possible
+        particle cannot fit in the (possibly pre-shrunk) container, or a
+        periodic edge is shorter than ``2 * (2 * rmax + gap)`` (the
+        minimum-image limit).
 
     See Also
     --------
@@ -461,6 +479,16 @@ def sample(
     >>> pack = sample(Ball(30.0), 3.0, seed=7)
     >>> bool(pack.region.contains(pack.points, pack.radii).all())
     True
+
+    A box periodic in x with a minimum gap of 0.5 between surfaces:
+
+    >>> from polydisc.regions import Box
+    >>> pack = sample(Box([60.0, 30.0], periodic=(True, False)), 1.0,
+    ...               gap=0.5, seed=7)
+    >>> from polydisc.diagnostics import nearest_neighbour_gaps
+    >>> bool(nearest_neighbour_gaps(pack.points, pack.radii, pack.region).min()
+    ...      >= 0.5 - 1e-9)
+    True
     """
     container = as_region(region)
     spec = as_radius_spec(radii, weights)
@@ -468,9 +496,17 @@ def sample(
     if int(repetitions) < 1:
         raise ValueError(f"repetitions must be >= 1, got {repetitions}")
 
+    gap = float(gap)
+    if not math.isfinite(gap) or gap < 0.0:
+        raise ValueError(f"gap must be a finite value >= 0, got {gap!r}")
+
     scale = spacing_scale(spacing)
     gen_region = container.scaled(1.0 / scale) if fit_bounds else container
     out_region = container if fit_bounds else container.scaled(scale)
+    # The dilation by `scale` widens gaps by at least `scale`, so sampling
+    # with gap / scale still leaves `gap` in the finished packing.
+    gen_gap = gap / scale
+    periodic = getattr(gen_region, "periodic", (False,) * gen_region.dimensions)
 
     limit = gen_region.max_particle_radius
     if spec.rmax >= limit:
@@ -485,6 +521,15 @@ def sample(
             f"largest particle (radius {spec.rmax:g}) does not fit in the "
             f"container, which admits at most {limit:g}{hint}"
         )
+
+    for axis, length in enumerate(gen_region.bounding_box):
+        if periodic[axis] and length < 2.0 * (2.0 * spec.rmax + gen_gap):
+            raise ValueError(
+                f"periodic edge {'xyz'[axis]} ({length:g} while sampling) is "
+                f"shorter than 2 * (2 * rmax + gap) = "
+                f"{2.0 * (2.0 * spec.rmax + gen_gap):g}; neighbours across "
+                "the face would be ambiguous"
+            )
 
     if max_points is None:
         max_points_int = _auto_max_points(gen_region, spec.rmin)
@@ -524,6 +569,8 @@ def sample(
         int(repetitions),
         seed_int,
         max_points_int,
+        gen_gap,
+        *periodic,
     )
 
     if gen_region.dimensions == 2:
@@ -551,6 +598,7 @@ def sample(
         seed=seed_int,
         repetitions=int(repetitions),
         saturated=status == _kernels.STATUS_SATURATED,
+        gap=gap,
     )
 
 
@@ -563,6 +611,7 @@ def poisson_disc_samples(
     seed: int | None = None,
     spacing: float = 0.0,
     fit_bounds: bool = True,
+    gap: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate a packing and return just the arrays.
 
@@ -585,6 +634,8 @@ def poisson_disc_samples(
         Clearance in mean radii.
     fit_bounds : bool, optional
         See :func:`sample`.
+    gap : float, optional
+        Minimum surface gap; see :func:`sample`.
 
     Returns
     -------
@@ -611,5 +662,6 @@ def poisson_disc_samples(
         seed=seed,
         spacing=spacing,
         fit_bounds=fit_bounds,
+        gap=gap,
     )
     return pack.points, pack.radii
