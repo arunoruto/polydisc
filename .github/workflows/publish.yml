@@ -110,11 +110,6 @@ jobs:
       contents: write  # release assets
       id-token: write  # trusted publishing
     steps:
-      - name: Checkout the release
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-
       - name: Fetch the distributions
         uses: actions/download-artifact@v8
         with:
@@ -124,8 +119,11 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@v1.14.2
 
+      # Not python-semantic-release/publish-action: on a checkout of the
+      # tag (a detached HEAD) it matches no release branch and gives up.
       - name: Attach them to the GitHub release
-        uses: python-semantic-release/publish-action@v10.7.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ needs.release.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release upload ${{ needs.release.outputs.tag }} dist/*
+          --repo ${{ github.repository }} --clobber
